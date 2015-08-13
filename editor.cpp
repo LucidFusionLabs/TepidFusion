@@ -34,6 +34,7 @@ void MyReshaped() {
   editor->Layout();
 }
 int Frame(LFL::Window *W, unsigned clicks, unsigned mic_samples, bool cam_sample, int flag) {
+  screen->gd->DisableBlend();
   screen->DrawDialogs();
   return 0;
 }
@@ -41,7 +42,7 @@ int Frame(LFL::Window *W, unsigned clicks, unsigned mic_samples, bool cam_sample
 }; // namespace LFL
 using namespace LFL;
 
-extern "C" int main(int argc, const char *argv[]) {
+extern "C" void LFAppCreateCB() {
   app->name = "LEdit";
   app->logfilename = StrCat(LFAppDownloadDir(), "ledit.txt");
   binds = new BindMap();
@@ -51,24 +52,24 @@ extern "C" int main(int argc, const char *argv[]) {
   screen->caption = app->name;
   screen->frame_cb = Frame;
   FLAGS_lfapp_video = FLAGS_lfapp_input = true;
+}
 
-  if (app->Create(argc, argv, __FILE__)) { app->Free(); return -1; }
+extern "C" int main(int argc, const char *argv[]) {
+  if (app->Create(argc, argv, __FILE__, LFAppCreateCB)) { app->Free(); return -1; }
   if (app->Init()) { app->Free(); return -1; }
   app->scheduler.AddWaitForeverKeyboard();
   app->scheduler.AddWaitForeverMouse();
   app->reshaped_cb = MyReshaped;
-
-  binds->Add(Bind('6', Key::Modifier::Cmd, Bind::CB(bind([&]() { app->shell.console(vector<string>()); }))));
+  binds->Add(Bind('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, app->shell, vector<string>()))));
 
   chdir(app->startdir.c_str());
   int optind = Singleton<FlagMap>::Get()->optind;
   if (optind >= argc) { fprintf(stderr, "Usage: %s [-flags] <file>\n", argv[0]); return -1; }
-  string s = LocalFile::FileContents(StrCat(argv[optind]));
 
-  Font *font = Fonts::Get(FLAGS_default_font, "", FLAGS_default_font_size, Color::black);
-  editor = new EditorDialog(screen, font, new BufferFile(s), 1, 1,
+  Font *font = Fonts::Get(FLAGS_default_font, "", FLAGS_default_font_size, Color::black, Color::white, FLAGS_default_font_flag);
+  editor = new EditorDialog(screen, font, new LocalFile(argv[optind], "r"), 1, 1,
                             Dialog::Flag::Fullscreen | (FLAGS_wrap ? EditorDialog::Flag::Wrap : 0));
-  editor->color = Color::white;
+  if (auto c = editor->editor.bg_color) screen->gd->ClearColor(*c);
 
   app->scheduler.Start();
   return app->Main();

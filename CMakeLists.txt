@@ -1,9 +1,11 @@
 # $Id: CMakeLists.txt 1320 2014-10-26 08:12:52Z justin $
 
+lfl_clear_projects()
 set(LFL_PNG 1)
 set(LFL_GLES2 1)
 set(LFL_LFLINPUT 1)
 set(LFL_LFLVIDEO 1)
+set(LFL_LIBCLANG 1)
 
 if(LFL_ANDROID)
 elseif(LFL_IPHONE)
