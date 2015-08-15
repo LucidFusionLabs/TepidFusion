@@ -23,11 +23,11 @@
 #include "lfapp/gui.h"
 
 namespace LFL {
-DEFINE_bool(wrap, 0, "Wrap lines");
-AssetMap asset;
-SoundAssetMap soundasset;
-EditorDialog *editor; 
+DEFINE_bool  (wrap,    0,  "Wrap lines");
+DEFINE_string(project, "", "CMake compile_commands.json");
+
 BindMap *binds;
+EditorDialog *editor; 
 
 void MyReshaped() {
   editor->box = screen->Box();
@@ -69,7 +69,13 @@ extern "C" int main(int argc, const char *argv[]) {
   Font *font = Fonts::Get(FLAGS_default_font, "", FLAGS_default_font_size, Color::black, Color::white, FLAGS_default_font_flag);
   editor = new EditorDialog(screen, font, new LocalFile(argv[optind], "r"), 1, 1,
                             Dialog::Flag::Fullscreen | (FLAGS_wrap ? EditorDialog::Flag::Wrap : 0));
-  if (auto c = editor->editor.bg_color) screen->gd->ClearColor(*c);
+  editor->editor.line.SetAttrSource(&editor->editor);
+  editor->editor.SetColors(Singleton<TextGUI::SolarizedLightColors>::Get());
+  if (auto c = editor->editor.bg_color) screen->gd->ClearColor((editor->color = *c));
+  if (FLAGS_project.size()) {
+    LocalFile ccf(FLAGS_project, "r");
+    (editor->editor.project = new IDE::Project())->LoadCMakeCompileCommandsJSON(&ccf);
+  }
 
   app->scheduler.Start();
   return app->Main();
