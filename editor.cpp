@@ -33,7 +33,7 @@ void MyReshaped() {
   editor->box = screen->Box();
   editor->Layout();
 }
-int Frame(LFL::Window *W, unsigned clicks, unsigned mic_samples, bool cam_sample, int flag) {
+int Frame(LFL::Window *W, unsigned clicks, int flag) {
   screen->gd->DisableBlend();
   screen->DrawDialogs();
   return 0;
@@ -77,6 +77,5 @@ extern "C" int main(int argc, const char *argv[]) {
     (editor->editor.project = new IDE::Project())->LoadCMakeCompileCommandsJSON(&ccf);
   }
 
-  app->scheduler.Start();
   return app->Main();
 }
