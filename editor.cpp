@@ -23,8 +23,10 @@
 #include "lfapp/gui.h"
 
 namespace LFL {
-DEFINE_bool  (wrap,    0,  "Wrap lines");
-DEFINE_string(project, "", "CMake compile_commands.json");
+DEFINE_bool  (wrap,    0,   "Wrap lines");
+DEFINE_string(project, "",  "CMake compile_commands.json");
+DEFINE_int   (width,   840, "Window width");
+DEFINE_int   (height,  760, "Window height");
 
 BindMap *binds;
 EditorDialog *editor; 
@@ -46,8 +48,8 @@ extern "C" void LFAppCreateCB() {
   app->name = "LEdit";
   app->logfilename = StrCat(LFAppDownloadDir(), "ledit.txt");
   binds = new BindMap();
-  screen->width = 840;
-  screen->height = 760;
+  screen->width = FLAGS_width;
+  screen->height = FLAGS_height;
   screen->binds = binds;
   screen->caption = app->name;
   screen->frame_cb = Frame;
@@ -56,11 +58,28 @@ extern "C" void LFAppCreateCB() {
 
 extern "C" int main(int argc, const char *argv[]) {
   if (app->Create(argc, argv, __FILE__, LFAppCreateCB)) { app->Free(); return -1; }
+  screen->width = FLAGS_width;
+  screen->height = FLAGS_height;
+
   if (app->Init()) { app->Free(); return -1; }
   app->scheduler.AddWaitForeverKeyboard();
   app->scheduler.AddWaitForeverMouse();
   app->reshaped_cb = MyReshaped;
+  app->shell.command.push_back(Shell::Command("save", [](const vector<string>&){ editor->editor.Save();             app->scheduler.Wakeup(0); }));
+  app->shell.command.push_back(Shell::Command("wrap", [](const vector<string>&){ editor->editor.ToggleShouldWrap(); app->scheduler.Wakeup(0); }));
+
   binds->Add(Bind('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, app->shell, vector<string>()))));
+  binds->Add(Bind('s', Key::Modifier::Cmd, Bind::CB(bind([&](){ app->shell.console(vector<string>(1, "save")); }))));
+  binds->Add(Bind('w', Key::Modifier::Cmd, Bind::CB(bind([&](){ app->shell.console(vector<string>(1, "wrap")); }))));
+
+  vector<MenuItem> file_menu{ MenuItem{ "s", "Save", "save" }, };
+  app->AddNativeMenu("File", file_menu);
+  app->AddNativeEditMenu();
+
+  vector<MenuItem> view_menu{
+    MenuItem{ "=", "Zoom In", "" }, MenuItem{ "-", "Zoom Out", "" },
+    MenuItem{ "w", "Wrap lines", "wrap" } };
+  app->AddNativeMenu("View", view_menu);
 
   chdir(app->startdir.c_str());
   int optind = Singleton<FlagMap>::Get()->optind;
