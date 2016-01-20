@@ -30,16 +30,22 @@ DEFINE_int   (height,  760, "Window height");
 
 BindMap *binds;
 EditorDialog *editor; 
+bool console_animating = 0;
+vector<MenuItem> context_menu{ MenuItem{ "", "Go To Definition", "gotodef" } };
 
 void MyReshaped() {
   editor->box = screen->Box();
   editor->Layout();
 }
+
 int Frame(LFL::Window *W, unsigned clicks, int flag) {
   screen->gd->DisableBlend();
   screen->DrawDialogs();
   return 0;
 }
+
+void UpdateAnimating() { app->scheduler.SetAnimating(console_animating); }
+void OnConsoleAnimating() { console_animating = screen->lfapp_console->animating; UpdateAnimating(); }
 
 }; // namespace LFL
 using namespace LFL;
@@ -65,12 +71,15 @@ extern "C" int main(int argc, const char *argv[]) {
   app->scheduler.AddWaitForeverKeyboard();
   app->scheduler.AddWaitForeverMouse();
   app->reshaped_cb = MyReshaped;
-  app->shell.command.push_back(Shell::Command("save", [](const vector<string>&){ editor->editor.Save();             app->scheduler.Wakeup(0); }));
-  app->shell.command.push_back(Shell::Command("wrap", [](const vector<string>&){ editor->editor.ToggleShouldWrap(); app->scheduler.Wakeup(0); }));
+  app->shell.command.push_back(Shell::Command("save",    [](const vector<string>&){ editor->editor.Save();                        app->scheduler.Wakeup(0); }));
+  app->shell.command.push_back(Shell::Command("wrap",    [](const vector<string>&){ editor->editor.ToggleShouldWrap();            app->scheduler.Wakeup(0); }));
+  app->shell.command.push_back(Shell::Command("gotodef", [](const vector<string>&){ editor->editor.GoToDefinition(screen->mouse); app->scheduler.Wakeup(0); }));
+  if (screen->lfapp_console) screen->lfapp_console->animating_cb = OnConsoleAnimating;
 
   binds->Add(Bind('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, app->shell, vector<string>()))));
-  binds->Add(Bind('s', Key::Modifier::Cmd, Bind::CB(bind([&](){ app->shell.console(vector<string>(1, "save")); }))));
-  binds->Add(Bind('w', Key::Modifier::Cmd, Bind::CB(bind([&](){ app->shell.console(vector<string>(1, "wrap")); }))));
+  binds->Add(Bind('s', Key::Modifier::Cmd, Bind::CB([=](){ app->shell.console(vector<string>(1, "save")); })));
+  binds->Add(Bind('w', Key::Modifier::Cmd, Bind::CB([=](){ app->shell.console(vector<string>(1, "wrap")); })));
+  binds->Add(Bind(Mouse::Button::_1, Key::Modifier::Ctrl, Bind::CB([=](){ app->LaunchNativeContextMenu(context_menu); })));
 
   vector<MenuItem> file_menu{ MenuItem{ "s", "Save", "save" }, };
   app->AddNativeMenu("File", file_menu);
@@ -81,7 +90,6 @@ extern "C" int main(int argc, const char *argv[]) {
     MenuItem{ "w", "Wrap lines", "wrap" } };
   app->AddNativeMenu("View", view_menu);
 
-  chdir(app->startdir.c_str());
   int optind = Singleton<FlagMap>::Get()->optind;
   if (optind >= argc) { fprintf(stderr, "Usage: %s [-flags] <file>\n", argv[0]); return -1; }
 
@@ -93,8 +101,10 @@ extern "C" int main(int argc, const char *argv[]) {
   if (auto c = editor->editor.bg_color) screen->gd->ClearColor((editor->color = *c));
   if (FLAGS_project.size()) {
     LocalFile ccf(FLAGS_project, "r");
-    (editor->editor.project = new IDE::Project())->LoadCMakeCompileCommandsJSON(&ccf);
+    (editor->editor.project = new IDE::Project())->LoadCMakeCompileCommandsFile(&ccf);
   }
+  screen->default_textgui = &editor->editor;
+  screen->AddDialog(editor);
 
   return app->Main();
 }
