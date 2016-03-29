@@ -47,7 +47,8 @@ struct EditorGUI : public GUI {
   DirectoryTreeDialog dir_tree;
   PropertyTreeDialog options_tree;
   unique_ptr<Terminal> build_terminal;
-  vector<MenuItem> context_menu{ MenuItem{ "", "Go To Definition", "gotodef" } };
+  vector<MenuItem> source_context_menu{ MenuItem{ "", "Go To Definition", "gotodef" } };
+  vector<MenuItem> dir_context_menu{ MenuItem{ "b", "Build", "build" } };
   bool console_animating = 0;
   ProcessPipe build_process;
 
@@ -61,6 +62,10 @@ struct EditorGUI : public GUI {
     dir_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (my_app->project) dir_tree.title_text = string(my_app->project->dir.c_str(), DirNameLen(my_app->project->dir));
     if (my_app->project) dir_tree.view.Open(StrCat(dir_tree.title_text, LocalFile::Slash));
+    dir_tree.view.InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(dir_context_menu); }));
+    dir_tree.view.selected_line_clicked_cb = [&](PropertyTree *t, PropertyTree::Id id) {
+      if (auto n = &t->tree[id-1]) if (n->val.size() && n->val.back() != '/') Open(n->val);
+    };
     dir_tabs.AddTab(&dir_tree);
     screen->gui.push_back(&dir_tree);
 
@@ -91,6 +96,7 @@ struct EditorGUI : public GUI {
     editor->view.line.SetAttrSource(&editor->view);
     editor->view.SetColors(Singleton<TextBox::SolarizedLightColors>::Get());
     editor->deleted_cb = [=](){ source_tabs.DelTab(editor); child_box.Clear(); delete editor; };
+    editor->view.InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
     source_tabs.AddTab(editor);
     child_box.Clear();
     return editor;
@@ -137,8 +143,7 @@ struct EditorGUI : public GUI {
     if (fo.fn.empty()) return;
     INFO("Editor GotoDefinition ", fo.fn, " ", fo.offset, " ", fo.y, " ", fo.x);
     auto editor = Open(fo.fn);
-    editor->view.UpdateMapping(editor->view.font->size, editor->content.w);
-    editor->view.UpdateAnnotation();
+    editor->view.CheckResized(Box(source_tabs.box.w, source_tabs.box.h-source_tabs.tab_dim.y));
     int lines = source_tabs.box.h / editor->view.font->Height();
     editor->view.SetVScroll(fo.y - lines/2);
     editor->view.cursor.i.y = lines/2 - 1;
@@ -176,7 +181,6 @@ void MyWindowStart(Window *W) {
   binds->Add('o', Key::Modifier::Cmd, Bind::CB([=](){ W->shell->console(vector<string>(1, "choose")); }));
   binds->Add('s', Key::Modifier::Cmd, Bind::CB([=](){ W->shell->console(vector<string>(1, "save")); }));
   binds->Add('w', Key::Modifier::Cmd, Bind::CB([=](){ W->shell->console(vector<string>(1, "wrap")); }));
-  binds->Add(Mouse::Button::_1, Key::Modifier::Ctrl, Bind::CB([=](){ app->LaunchNativeContextMenu(editor_gui->context_menu); }));
 
   W->shell = make_unique<Shell>(nullptr, nullptr, nullptr);
   W->shell->Add("choose",       [=](const vector<string>&) { app->LaunchNativeFileChooser(1,0,0,"open"); });
