@@ -17,11 +17,9 @@
  */
 
 #include "core/app/app.h"
-#include "core/web/dom.h"
-#include "core/web/css.h"
-#include "core/app/flow.h"
 #include "core/app/gui.h"
 #include "core/app/ipc.h"
+#include "json/json.h"
 
 namespace LFL {
 DEFINE_string(project, "",  "CMake compile_commands.json");
@@ -35,6 +33,88 @@ struct MyAppState {
   string build_bin;
   MyAppState() : search_paths(getenv("PATH")), build_bin(search_paths.Find("make")) {}
 } *my_app;
+
+struct CMakeDaemon {
+  enum { Null=0, Init=1, HaveTargets=2 };
+  struct Proto {
+    static const string header, footer;
+    static string MakeBuildsystem() { return StrCat(header, "{\"type\":\"buildsystem\"}", footer); }
+    static string MakeHandshake(const string &v) {
+      return StrCat(header, "{\"type\":\"handshake\",\"protocolVersion\":\"", v, "\"}", footer);
+    }
+    static string MakeTargetInfo(const string &n, const string &c) {
+      return StrCat(header, "{\"type\":\"target_info\",\"target_name\":\"", n, "\",\"config\":\"", c, "\"}", footer);
+    }
+    static string MakeFileInfo(const string &n, const string &p, const string &c) {
+      return StrCat(header, "{\"type\":\"file_info\",\"target_name\":\"", n,
+                    "\",\"file_path\":\"", p, "\",\"config\":\"", c, "\"}", footer);
+    }
+  };
+  struct Target {
+    string name, decl_file;
+    int decl_line;
+  };
+
+  ProcessPipe process;
+  int state = Null;
+  vector<Target> targets;
+  CMakeDaemon() {}
+
+  void Start(const string &bin, const string &builddir) {
+    if (process.in) return;
+    vector<const char*> argv{ bin.c_str(), "-E", "daemon", builddir.c_str(), nullptr };
+    CHECK(!process.Open(argv.data(), app->startdir.c_str()));
+    app->RunInNetworkThread([=](){ app->net->unix_client->AddConnectedSocket
+                            (fileno(process.in), new Connection::CallbackHandler
+                             (bind(&CMakeDaemon::HandleRead, this, _1),
+                              bind(&CMakeDaemon::HandleClose, this, _1)));
+                            CHECK(FWriteSuccess(process.out, Proto::MakeHandshake("3.5"))); }); 
+  }
+
+  void HandleClose(Connection *c) {
+    INFO("CMakeDaemon died");
+    process.Close();
+  }
+
+  void HandleRead(Connection *c) {
+    while (c->rb.size() >= Proto::header.size()) {
+      if (!PrefixMatch(c->rb.buf.data(), Proto::header)) { c->ReadFlush(c->rb.size()); return; }
+      const char *start = c->rb.buf.data() + Proto::header.size();
+      const char *end = strstr(start, Proto::footer.c_str());
+      if (!end) break;
+      Json::Value json;
+      Json::Reader reader;
+      string json_text(start, end-start);
+      CHECK(reader.parse(json_text, json, false));
+      HandleMessage(json, json_text);
+      c->ReadFlush(end + Proto::footer.size() - c->rb.begin());
+    }
+  }
+
+  void HandleMessage(const Json::Value &json, const string &json_text) {
+    printf("CMakeDaemon read '%s'\n", json_text.c_str());
+    if (state < Init && json["progress"].asString() == "computed" && (state = Init)) {
+      CHECK(FWriteSuccess(process.out, Proto::MakeBuildsystem()));
+    }
+    if (state < HaveTargets && json.isMember("buildsystem") && (state = HaveTargets)) {
+      const Json::Value &json_targets=json["buildsystem"]["targets"];
+      for (int i=0, l=json_targets.size(); i != l; ++i) {
+        const Json::Value &v = json_targets[i], &bt0 = v["backtrace"][0];
+        targets.push_back({ v["name"].asString(), bt0["path"].asString(), bt0["line"].asInt() });
+      }
+
+      for (auto &t : targets)
+        printf("CMakeDaemon target %s declared %s:%d\n", t.name.c_str(), t.decl_file.c_str(), t.decl_line);
+
+      CHECK(FWriteSuccess(process.out, Proto::MakeTargetInfo("app_opencv_matrix", ""))); 
+      //CHECK(FWriteSuccess(process.out, Proto::MakeTargetInfo("lterm", ""))); 
+      //CHECK(FWriteSuccess(process.out, Proto::MakeFileInfo("lterm", "/Users/p/lfl/term/term.cpp", ""))); 
+    }
+  }
+};
+
+const string CMakeDaemon::Proto::header = "\n[== CMake MetaMagic ==[\n";
+const string CMakeDaemon::Proto::footer = "\n]== CMake MetaMagic ==]\n";
 
 struct EditorGUI : public GUI {
   static const int init_right_divider_w=224;
@@ -51,6 +131,7 @@ struct EditorGUI : public GUI {
   vector<MenuItem> dir_context_menu{ MenuItem{ "b", "Build", "build" } };
   bool console_animating = 0;
   ProcessPipe build_process;
+  CMakeDaemon cmakedaemon;
 
   EditorGUI() :
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
@@ -83,6 +164,8 @@ struct EditorGUI : public GUI {
 
     build_terminal = make_unique<Terminal>(nullptr, screen->gd, screen->default_font);
     build_terminal->newline_mode = true;
+
+    // if (my_app->project) cmakedaemon.Start(Asset::FileName("bin/cmake"), my_app->project->dir);
   }
 
   Editor *Top() { return source_tabs.top ? &source_tabs.top->view : 0; }
