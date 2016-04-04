@@ -175,7 +175,7 @@ struct EditorGUI : public GUI {
     string fn = PrefixMatch(fin, prefix) ? fin.substr(prefix.size()) : fin;
     INFO("Editor Open ", fn);
     EditorDialog *editor = new EditorDialog(screen->gd, screen->default_font, new LocalFile(fn, "r"), 1, 1); 
-    editor->view.project = my_app->project.get();
+    editor->view.LoadAnnotation(my_app->project.get());
     editor->view.line.SetAttrSource(&editor->view);
     editor->view.SetColors(Singleton<TextBox::SolarizedLightColors>::Get());
     editor->deleted_cb = [=](){ source_tabs.DelTab(editor); child_box.Clear(); delete editor; };
@@ -259,21 +259,20 @@ void MyWindowStart(Window *W) {
   W->frame_cb = bind(&EditorGUI::Frame, editor_gui, _1, _2, _3);
   W->default_textbox = [=](){ return editor_gui->Top(); };
 
-  BindMap *binds = W->AddInputController(make_unique<BindMap>());
-  binds->Add('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, W->shell.get(), vector<string>())));
-  binds->Add('o', Key::Modifier::Cmd, Bind::CB([=](){ W->shell->console(vector<string>(1, "choose")); }));
-  binds->Add('s', Key::Modifier::Cmd, Bind::CB([=](){ W->shell->console(vector<string>(1, "save")); }));
-  binds->Add('w', Key::Modifier::Cmd, Bind::CB([=](){ W->shell->console(vector<string>(1, "wrap")); }));
-
   W->shell = make_unique<Shell>(nullptr, nullptr, nullptr);
   W->shell->Add("choose",       [=](const vector<string>&) { app->LaunchNativeFileChooser(1,0,0,"open"); });
-  W->shell->Add("save",         [=](const vector<string>&) { editor_gui->Top()->Save();             app->scheduler.Wakeup(0); });
-  W->shell->Add("wrap",         [=](const vector<string>&) { editor_gui->Top()->ToggleShouldWrap(); app->scheduler.Wakeup(0); });
+  W->shell->Add("save",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->Save();             app->scheduler.Wakeup(0); });
+  W->shell->Add("wrap",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->ToggleShouldWrap(); app->scheduler.Wakeup(0); });
+  W->shell->Add("undo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->WalkUndo(true);     app->scheduler.Wakeup(0); });
+  W->shell->Add("redo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->WalkUndo(false);    app->scheduler.Wakeup(0); });
   W->shell->Add("gotodef",      [=](const vector<string>&) { editor_gui->GotoDefinition();          app->scheduler.Wakeup(0); });
   W->shell->Add("open",         [=](const vector<string>&a){ editor_gui->Open(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
   W->shell->Add("build",        [=](const vector<string>&a){ editor_gui->Build();                   app->scheduler.Wakeup(0); });
   W->shell->Add("show_project", [=](const vector<string>&) { editor_gui->ShowProjectExplorer();     app->scheduler.Wakeup(0); });
   W->shell->Add("show_build",   [=](const vector<string>&) { editor_gui->ShowBuildTerminal();       app->scheduler.Wakeup(0); });
+
+  BindMap *binds = W->AddInputController(make_unique<BindMap>());
+  binds->Add('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, W->shell.get(), vector<string>())));
 }
 
 }; // namespace LFL
@@ -281,6 +280,7 @@ using namespace LFL;
 
 extern "C" void MyAppCreate() {
   FLAGS_lfapp_video = FLAGS_lfapp_input = true;
+  FLAGS_threadpool_size = 1;
   app = new Application();
   screen = new Window();
   my_app = new MyAppState();
@@ -308,7 +308,9 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
   vector<MenuItem> file_menu{ MenuItem{"o", "Open", "choose"}, MenuItem{"s", "Save", "save" },
     MenuItem{"b", "Build", "build"} };
   app->AddNativeMenu("File", file_menu);
-  app->AddNativeEditMenu();
+
+  vector<MenuItem> edit_menu { MenuItem{"z", "Undo", "undo"}, MenuItem{"y", "Redo", "redo"} };
+  app->AddNativeEditMenu(edit_menu);
 
   vector<MenuItem> view_menu{
     MenuItem{"=", "Zoom In", ""}, MenuItem{"-", "Zoom Out", ""}, MenuItem{"w", "Wrap lines", "wrap"},
