@@ -16,105 +16,25 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "core/app/app.h"
 #include "core/app/gui.h"
 #include "core/app/ipc.h"
-#include "json/json.h"
+#include "core/app/bindings/ide.h"
 
 namespace LFL {
-DEFINE_string(project, "",  "CMake compile_commands.json");
-DEFINE_int   (width,   840, "Window width");
-DEFINE_int   (height,  760, "Window height");
+DEFINE_string(project,         "",          "CMake build dir");
+DEFINE_int   (width,           840,         "Window width");
+DEFINE_int   (height,          760,         "Window height");
+DEFINE_string(cmake_daemon,    "bin/cmake", "CMake daemon");
+DEFINE_string(default_project, "",          "Default project");
 extern FlagOfType<bool> FLAGS_lfapp_network_;
 
 struct MyAppState {
-  unique_ptr<IDE::Project> project;
+  vector<string> save_settings = { "default_project" };
+  unique_ptr<IDEProject> project;
   SearchPaths search_paths;
   string build_bin;
   MyAppState() : search_paths(getenv("PATH")), build_bin(search_paths.Find("make")) {}
 } *my_app;
-
-struct CMakeDaemon {
-  enum { Null=0, Init=1, HaveTargets=2 };
-  struct Proto {
-    static const string header, footer;
-    static string MakeBuildsystem() { return StrCat(header, "{\"type\":\"buildsystem\"}", footer); }
-    static string MakeHandshake(const string &v) {
-      return StrCat(header, "{\"type\":\"handshake\",\"protocolVersion\":\"", v, "\"}", footer);
-    }
-    static string MakeTargetInfo(const string &n, const string &c) {
-      return StrCat(header, "{\"type\":\"target_info\",\"target_name\":\"", n, "\",\"config\":\"", c, "\"}", footer);
-    }
-    static string MakeFileInfo(const string &n, const string &p, const string &c) {
-      return StrCat(header, "{\"type\":\"file_info\",\"target_name\":\"", n,
-                    "\",\"file_path\":\"", p, "\",\"config\":\"", c, "\"}", footer);
-    }
-  };
-  struct Target {
-    string name, decl_file;
-    int decl_line;
-  };
-
-  ProcessPipe process;
-  int state = Null;
-  vector<Target> targets;
-  CMakeDaemon() {}
-
-  void Start(const string &bin, const string &builddir) {
-    if (process.in) return;
-    vector<const char*> argv{ bin.c_str(), "-E", "daemon", builddir.c_str(), nullptr };
-    CHECK(!process.Open(argv.data(), app->startdir.c_str()));
-    app->RunInNetworkThread([=](){ app->net->unix_client->AddConnectedSocket
-                            (fileno(process.in), new Connection::CallbackHandler
-                             (bind(&CMakeDaemon::HandleRead, this, _1),
-                              bind(&CMakeDaemon::HandleClose, this, _1)));
-                            CHECK(FWriteSuccess(process.out, Proto::MakeHandshake("3.5"))); }); 
-  }
-
-  void HandleClose(Connection *c) {
-    INFO("CMakeDaemon died");
-    process.Close();
-  }
-
-  void HandleRead(Connection *c) {
-    while (c->rb.size() >= Proto::header.size()) {
-      if (!PrefixMatch(c->rb.buf.data(), Proto::header)) { c->ReadFlush(c->rb.size()); return; }
-      const char *start = c->rb.buf.data() + Proto::header.size();
-      const char *end = strstr(start, Proto::footer.c_str());
-      if (!end) break;
-      Json::Value json;
-      Json::Reader reader;
-      string json_text(start, end-start);
-      CHECK(reader.parse(json_text, json, false));
-      HandleMessage(json, json_text);
-      c->ReadFlush(end + Proto::footer.size() - c->rb.begin());
-    }
-  }
-
-  void HandleMessage(const Json::Value &json, const string &json_text) {
-    printf("CMakeDaemon read '%s'\n", json_text.c_str());
-    if (state < Init && json["progress"].asString() == "computed" && (state = Init)) {
-      CHECK(FWriteSuccess(process.out, Proto::MakeBuildsystem()));
-    }
-    if (state < HaveTargets && json.isMember("buildsystem") && (state = HaveTargets)) {
-      const Json::Value &json_targets=json["buildsystem"]["targets"];
-      for (int i=0, l=json_targets.size(); i != l; ++i) {
-        const Json::Value &v = json_targets[i], &bt0 = v["backtrace"][0];
-        targets.push_back({ v["name"].asString(), bt0["path"].asString(), bt0["line"].asInt() });
-      }
-
-      for (auto &t : targets)
-        printf("CMakeDaemon target %s declared %s:%d\n", t.name.c_str(), t.decl_file.c_str(), t.decl_line);
-
-      CHECK(FWriteSuccess(process.out, Proto::MakeTargetInfo("app_opencv_matrix", ""))); 
-      //CHECK(FWriteSuccess(process.out, Proto::MakeTargetInfo("lterm", ""))); 
-      //CHECK(FWriteSuccess(process.out, Proto::MakeFileInfo("lterm", "/Users/p/lfl/term/term.cpp", ""))); 
-    }
-  }
-};
-
-const string CMakeDaemon::Proto::header = "\n[== CMake MetaMagic ==[\n";
-const string CMakeDaemon::Proto::footer = "\n]== CMake MetaMagic ==]\n";
 
 struct EditorGUI : public GUI {
   static const int init_right_divider_w=224;
@@ -122,33 +42,41 @@ struct EditorGUI : public GUI {
   Widget::Divider bottom_divider, right_divider;
   TabbedDialogInterface *right_pane_tabs=0;
   TabbedDialog<EditorDialog> source_tabs;
-  TabbedDialog<DirectoryTreeDialog> dir_tabs;
+  TabbedDialog<Dialog> project_tabs;
   TabbedDialog<PropertyTreeDialog> options_tabs;
   DirectoryTreeDialog dir_tree;
-  PropertyTreeDialog options_tree;
+  PropertyTreeDialog targets_tree, options_tree;
   unique_ptr<Terminal> build_terminal;
   vector<MenuItem> source_context_menu{ MenuItem{ "", "Go To Definition", "gotodef" } };
   vector<MenuItem> dir_context_menu{ MenuItem{ "b", "Build", "build" } };
   bool console_animating = 0;
   ProcessPipe build_process;
   CMakeDaemon cmakedaemon;
+  CMakeDaemon::TargetInfo default_project;
 
   EditorGUI() :
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
-    source_tabs(this), dir_tabs(this), options_tabs(this),
+    source_tabs(this), project_tabs(this), options_tabs(this),
     dir_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
+    targets_tree(screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
     options_tree(screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)) {
     Activate(); 
 
     dir_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
-    if (my_app->project) dir_tree.title_text = string(my_app->project->dir.c_str(), DirNameLen(my_app->project->dir));
-    if (my_app->project) dir_tree.view.Open(StrCat(dir_tree.title_text, LocalFile::Slash));
+    if (my_app->project) dir_tree.title_text = "Source";
+    if (my_app->project) dir_tree.view.Open(StrCat(my_app->project->source_dir, LocalFile::Slash));
     dir_tree.view.InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(dir_context_menu); }));
     dir_tree.view.selected_line_clicked_cb = [&](PropertyTree *t, PropertyTree::Id id) {
       if (auto n = &t->tree[id-1]) if (n->val.size() && n->val.back() != '/') Open(n->val);
     };
-    dir_tabs.AddTab(&dir_tree);
+    project_tabs.AddTab(&dir_tree);
     screen->gui.push_back(&dir_tree);
+
+    targets_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
+    if (my_app->project) targets_tree.title_text = "Targets";
+    project_tabs.AddTab(&targets_tree);
+    screen->gui.push_back(&targets_tree);
+    project_tabs.SelectTab(&dir_tree);
 
     options_tree.view.SetRoot(options_tree.view.AddNode(nullptr, "", PropertyTree::Children{
       options_tree.view.AddNode(nullptr, "Aaaa", PropertyTree::Children{
@@ -158,14 +86,29 @@ struct EditorGUI : public GUI {
         options_tree.view.AddNode(nullptr, "B-sub1"), options_tree.view.AddNode(nullptr, "B-sub2"),
         options_tree.view.AddNode(nullptr, "B-sub3"), options_tree.view.AddNode(nullptr, "B-sub4")}) }));
     options_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
-    if (my_app->project) options_tree.title_text = my_app->project->dir;
+    if (my_app->project) options_tree.title_text = "Options";
     options_tabs.AddTab(&options_tree);
     screen->gui.push_back(&options_tree);
 
     build_terminal = make_unique<Terminal>(nullptr, screen->gd, screen->default_font);
     build_terminal->newline_mode = true;
 
-    // if (my_app->project) cmakedaemon.Start(Asset::FileName("bin/cmake"), my_app->project->dir);
+    if (my_app->project && !FLAGS_cmake_daemon.empty()) {
+      cmakedaemon.init_targets_cb = [&](){ app->RunInMainThread([&]{
+        targets_tree.view.tree.Clear();
+        PropertyTree::Children target;
+        for (auto &t : cmakedaemon.targets) target.push_back(targets_tree.view.AddNode(nullptr, t.first));
+        targets_tree.view.SetRoot(targets_tree.view.AddNode(nullptr, "", move(target)));
+        targets_tree.view.Reload();
+        targets_tree.view.Redraw();
+        if (!FLAGS_default_project.empty() && !cmakedaemon.GetTargetInfo
+            (FLAGS_default_project, bind(&EditorGUI::UpdateDefaultProjectProperties, this, _1)))
+          ERROR("default_project ", FLAGS_default_project, " not found");
+      }); };
+      cmakedaemon.Start
+        (FLAGS_cmake_daemon[0] == '/' ? FLAGS_cmake_daemon : Asset::FileName(FLAGS_cmake_daemon),
+         my_app->project->build_dir);
+    }
   }
 
   Editor *Top() { return source_tabs.top ? &source_tabs.top->view : 0; }
@@ -175,9 +118,10 @@ struct EditorGUI : public GUI {
     string fn = PrefixMatch(fin, prefix) ? fin.substr(prefix.size()) : fin;
     INFO("Editor Open ", fn);
     EditorDialog *editor = new EditorDialog(screen->gd, screen->default_font, new LocalFile(fn, "r"), 1, 1); 
-    editor->view.LoadAnnotation(my_app->project.get());
-    editor->view.line.SetAttrSource(&editor->view);
-    editor->view.SetColors(Singleton<TextBox::SolarizedLightColors>::Get());
+    editor->view.update_annotation_cb = bind(&ClangCPlusPlusHighlighter::UpdateAnnotation, &editor->view);
+    LoadAnnotation(&editor->view);
+    editor->view.line.SetAttrSource(&editor->view.style);
+    editor->view.SetSyntax(Singleton<Editor::Base16DefaultDarkSyntaxColors>::Get());
     editor->deleted_cb = [=](){ source_tabs.DelTab(editor); child_box.Clear(); delete editor; };
     editor->view.InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
     source_tabs.AddTab(editor);
@@ -193,7 +137,7 @@ struct EditorGUI : public GUI {
     source_tabs.box = top_center_pane;
     source_tabs.tab_dim.y = screen->default_font->Height();
     source_tabs.Layout();
-    if (1) right_pane_tabs = &dir_tabs;
+    if (1) right_pane_tabs = &project_tabs;
     else   right_pane_tabs = &options_tabs;
     right_pane_tabs->box = right_pane;
     right_pane_tabs->tab_dim.y = screen->default_font->Height();
@@ -202,10 +146,17 @@ struct EditorGUI : public GUI {
   }
 
   int Frame(LFL::Window *W, unsigned clicks, int flag) {
+    if (Singleton<FlagMap>::Get()->dirty) {
+      Singleton<FlagMap>::Get()->dirty = false;
+      chdir(app->startdir.c_str());
+      SettingsFile::Write(my_app->save_settings, LFAppDownloadDir(), "settings");
+      INFO("wrote settings");
+    }
     W->gd->DisableBlend();
     if (bottom_divider.changed || right_divider.changed) Layout();
-    GUI::Draw();
+    if (child_box.data.empty()) Layout();
     source_tabs.Draw();
+    GUI::Draw();
     screen->gd->DrawMode(DrawMode::_2D);
     if (bottom_center_pane.h) build_terminal->Draw(bottom_center_pane, TextArea::DrawFlag::CheckResized);
     screen->gd->DrawMode(DrawMode::_2D);
@@ -220,6 +171,25 @@ struct EditorGUI : public GUI {
   void OnConsoleAnimating() { console_animating = screen->console->animating; UpdateAnimating(); }
   void ShowProjectExplorer() { right_divider.size = init_right_divider_w; right_divider.changed=1; }
   void ShowBuildTerminal() { bottom_divider.size = screen->default_font->Height()*5; bottom_divider.changed=1; }
+  void UpdateDefaultProjectProperties(const CMakeDaemon::TargetInfo &v) { default_project = v; }
+
+  void LoadAnnotation(Editor *e) {
+    string filename = e->file->Filename(), compile_cmd, compile_dir;
+    if (!my_app->project->GetCompileCommand(filename, &compile_cmd, &compile_dir)) {
+      if (!FileSuffix::CPP(filename)) return ERROR("no compile command for ", filename);
+      compile_cmd = "clang";
+      compile_dir = default_project.output.substr(0, DirNameLen(default_project.output));
+      for (auto &d : default_project.compile_definitions) StrAppend(&compile_cmd, " -D", d);
+      for (auto &o : default_project.compile_options)     StrAppend(&compile_cmd, " ",   o);
+      for (auto &i : default_project.include_directories) StrAppend(&compile_cmd, " -I", i);
+      StrAppend(&compile_cmd, "-c src.c -o out.o");
+    }
+    app->RunInThreadPool([=](){
+      auto f = new IDEFile(filename, compile_cmd, compile_dir);
+      app->RunInMainThread([=]()
+        { e->ide_file = unique_ptr<IDEFile>(f); e->update_annotation_cb(); e->RefreshLines(); e->Redraw(); });
+    });
+  }
 
   void GotoDefinition() {
     FileNameAndOffset fo = Top() ? Top()->FindDefinition(screen->mouse) : FileNameAndOffset();
@@ -227,7 +197,7 @@ struct EditorGUI : public GUI {
     INFO("Editor GotoDefinition ", fo.fn, " ", fo.offset, " ", fo.y, " ", fo.x);
     auto editor = Open(fo.fn);
     editor->view.CheckResized(Box(source_tabs.box.w, source_tabs.box.h-source_tabs.tab_dim.y));
-    int lines = source_tabs.box.h / editor->view.font->Height();
+    int lines = source_tabs.box.h / editor->view.style.font->Height();
     editor->view.SetVScroll(fo.y - lines/2);
     editor->view.cursor.i.y = lines/2 - 1;
     editor->view.UpdateCursorX(fo.x);
@@ -237,7 +207,7 @@ struct EditorGUI : public GUI {
     if (bottom_divider.size < screen->default_font->Height()) ShowBuildTerminal();
     if (build_process.in) return;
     vector<const char*> argv{ my_app->build_bin.c_str(), nullptr };
-    string build_dir = StrCat(my_app->project->dir, LocalFile::Slash, "term");
+    string build_dir = StrCat(my_app->project->build_dir, LocalFile::Slash, "term");
     CHECK(!build_process.Open(&argv[0], build_dir.c_str()));
     app->RunInNetworkThread([=](){ app->net->unix_client->AddConnectedSocket
       (fileno(build_process.in), new Connection::CallbackHandler
@@ -297,8 +267,14 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
   screen->height = FLAGS_height;
 
   if (app->Init()) return -1;
+  int optind = Singleton<FlagMap>::Get()->optind;
+  if (optind >= argc) { fprintf(stderr, "Usage: %s [-flags] <file>\n", argv[0]); return -1; }
+
+  SettingsFile::Read(LFAppDownloadDir(), "settings");
+  Singleton<FlagMap>::Get()->dirty = false;
   app->scheduler.AddWaitForeverKeyboard();
   app->scheduler.AddWaitForeverMouse();
+
   bool start_network_thread = !(FLAGS_lfapp_network_.override && !FLAGS_lfapp_network);
   if (start_network_thread) {
     app->net = make_unique<Network>();
@@ -318,16 +294,11 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
     MenuItem{"", "Show Build Console", "show_build"} };
   app->AddNativeMenu("View", view_menu);
 
-  int optind = Singleton<FlagMap>::Get()->optind;
-  if (optind >= argc) { fprintf(stderr, "Usage: %s [-flags] <file>\n", argv[0]); return -1; }
-
   if (FLAGS_project.size()) {
-    LocalFile ccf(FLAGS_project, "r");
-    my_app->project = make_unique<IDE::Project>();
-    my_app->project->LoadCMakeCompileCommandsFile(&ccf);
-    my_app->project->dir = string(FLAGS_project.c_str(), DirNameLen(FLAGS_project));
-    INFO("Project dir = ", my_app->project->dir);
+    my_app->project = make_unique<IDEProject>(FLAGS_project);
+    INFO("Project dir = ", my_app->project->build_dir);
     INFO("Found make = ", my_app->build_bin);
+    INFO("Default project = ", FLAGS_default_project);
   }
 
   app->StartNewWindow(screen);
