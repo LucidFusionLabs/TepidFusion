@@ -19,12 +19,14 @@
 #include "core/app/gui.h"
 #include "core/app/ipc.h"
 #include "core/app/bindings/ide.h"
+#include "core/imports/diff-match-patch-cpp-stl/diff_match_patch.h"
 
 namespace LFL {
 DEFINE_string(project,         "",              "CMake build dir");
 DEFINE_int   (width,           840,             "Window width");
 DEFINE_int   (height,          760,             "Window height");
 DEFINE_string(llvm_dir,        "/Users/p/llvm", "LLVM toolchain");
+DEFINE_string(cvs_cmd,         "git",           "CVS command, ie git");
 DEFINE_string(cmake_daemon,    "bin/cmake",     "CMake daemon");
 DEFINE_string(default_project, "",              "Default project");
 extern FlagOfType<bool> FLAGS_lfapp_network_;
@@ -37,13 +39,20 @@ struct MyAppState {
   MyAppState() : search_paths(getenv("PATH")), build_bin(search_paths.Find("make")) {}
 } *my_app;
 
+struct MyEditorDialog : public EditorDialog {
+  unique_ptr<TranslationUnit> main_tu, next_tu;
+  bool parsing=0, needs_reparse=0;
+  int reparsed=0;
+  using EditorDialog::EditorDialog;
+};
+
 struct EditorGUI : public GUI {
   static const int init_right_divider_w=224;
   Box top_center_pane, bottom_center_pane, left_pane, right_pane;
   Widget::Divider bottom_divider, right_divider;
-  unordered_map<string, EditorDialog*> opened_files;
+  unordered_map<string, shared_ptr<EditorDialog>> opened_files;
   TabbedDialogInterface *right_pane_tabs=0;
-  TabbedDialog<EditorDialog> source_tabs;
+  TabbedDialog<MyEditorDialog> source_tabs;
   TabbedDialog<Dialog> project_tabs;
   TabbedDialog<PropertyTreeDialog> options_tabs;
   DirectoryTreeDialog dir_tree;
@@ -113,33 +122,39 @@ struct EditorGUI : public GUI {
     }
   }
 
-  Editor *Top() { return source_tabs.top ? &source_tabs.top->view : 0; }
+  MyEditorDialog *Top() { return source_tabs.top; }
 
-  EditorDialog *Open(const string &fin) {
+  MyEditorDialog *Open(const string &fin) {
     static string prefix = "file://";
     string fn = PrefixMatch(fin, prefix) ? fin.substr(prefix.size()) : fin;
     auto opened = opened_files.find(fn);
-    if (opened != opened_files.end()) { source_tabs.SelectTab(opened->second); return opened->second; }
-
+    if (opened != opened_files.end()) {
+      auto ret = dynamic_cast<MyEditorDialog*>(opened->second.get());
+      source_tabs.SelectTab(ret);
+      return ret;
+    }
     INFO("Editor Open ", fn);
-    EditorDialog *editor = new EditorDialog(screen->gd, screen->default_font, new LocalFile(fn, "r"), 1, 1); 
+    return OpenFile(new LocalFile(fn, "r"));
+  }
+
+  MyEditorDialog *OpenFile(File *input_file) {
+    MyEditorDialog *editor = new MyEditorDialog(screen->gd, screen->default_font, input_file, 1, 1); 
     Editor *e = &editor->view;
-    fn = e->file->Filename();
-    opened_files[fn] = editor;
+    string fn = e->file->Filename();
+    opened_files[fn] = shared_ptr<MyEditorDialog>(editor);
     source_tabs.AddTab(editor);
     child_box.Clear();
 
-    e->update_annotation_cb = bind(&ClangCPlusPlusHighlighter::UpdateAnnotation, &editor->view);
     e->modified_cb = [=]{ app->scheduler.WakeupIn(0, Seconds(1), true); };
-    e->newline_cb = bind(&EditorGUI::IndentNewline, this, &editor->view);
-    ParseTranslationUnit(e);
+    e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
+    e->tab_cb = bind(&EditorGUI::CompleteCode, this);
+    ParseTranslationUnit(editor);
     e->line.SetAttrSource(&editor->view.style);
     e->SetSyntax(Singleton<Editor::Base16DefaultDarkSyntaxColors>::Get());
     e->InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
     if (source_tabs.box.h) e->CheckResized(Box(source_tabs.box.w, source_tabs.box.h-source_tabs.tab_dim.y));
 
-    editor->deleted_cb = [=]()
-    { opened_files.erase(fn); source_tabs.DelTab(editor); child_box.Clear(); delete editor; };
+    editor->deleted_cb = [=](){ source_tabs.DelTab(editor); child_box.Clear(); opened_files.erase(fn); };
     return editor;
   }
 
@@ -167,9 +182,9 @@ struct EditorGUI : public GUI {
       INFO("wrote settings");
     }
     Time now = Now();
-    Editor *e = Top();
-    if (e && e->modified != Time(0) &&
-        e->modified + Seconds(1) <= now) { e->modified = Time(0); ReparseTranslationUnit(e); }
+    MyEditorDialog *d = Top();
+    if (d && d->view.modified != Time(0) &&
+        d->view.modified + Seconds(1) <= now) { d->view.modified = Time(0); ReparseTranslationUnit(d); }
 
     W->gd->DisableBlend();
     if (bottom_divider.changed || right_divider.changed) Layout();
@@ -192,13 +207,13 @@ struct EditorGUI : public GUI {
   void ShowBuildTerminal() { bottom_divider.size = screen->default_font->Height()*5; bottom_divider.changed=1; }
   void UpdateDefaultProjectProperties(const CMakeDaemon::TargetInfo &v) { default_project = v; }
 
-  void IndentNewline(Editor *e) {
+  void IndentNewline(MyEditorDialog *e) {
     // find first previous line with text and call its indentation x
     // next identation is x + abs_bracks
   }
-
-  void ParseTranslationUnit(Editor *e) {
-    string filename = e->file->Filename(), compile_cmd, compile_dir;
+  
+  void ParseTranslationUnit(MyEditorDialog *d) {
+    string filename = d->view.file->Filename(), compile_cmd, compile_dir;
     if (!my_app->project->GetCompileCommand(filename, &compile_cmd, &compile_dir)) {
       if (!FileSuffix::CPP(filename)) return ERROR("no compile command for ", filename);
       compile_cmd = "clang";
@@ -208,21 +223,47 @@ struct EditorGUI : public GUI {
       for (auto &i : default_project.include_directories) StrAppend(&compile_cmd, " -I", i);
       StrAppend(&compile_cmd, "-c src.c -o out.o");
     }
+    ParseTranslationUnit(d, new TranslationUnit(filename, compile_cmd, compile_dir), false);
+  }
+
+  void ParseTranslationUnit(MyEditorDialog *d, TranslationUnit *tu, bool reparse) {
+    d->reparsed++;
+    d->parsing = true;
+    d->needs_reparse = false;
+    auto opened = opened_files;
     app->RunInThreadPool([=](){
-      auto tu = new TranslationUnit(filename, compile_cmd, compile_dir);
-      app->RunInMainThread([=]()
-        { e->tu = unique_ptr<TranslationUnit>(tu); e->update_annotation_cb(); e->RefreshLines(); e->Redraw(); });
+      if (reparse) tu->Reparse(opened);
+      else         tu->Parse(opened);
+      app->RunInMainThread(bind(&EditorGUI::ParseTranslationUnitDone, this, d, tu, !reparse)); 
     });
   }
 
-  void ReparseTranslationUnit(Editor *e) {
-    INFO("reparse");
+  void ReparseTranslationUnit(MyEditorDialog *d) {
+    if (d->parsing) { d->needs_reparse = true; return; }
+    if (d->next_tu && d->next_tu->parse_failed) d->next_tu.reset();
+    if (!d->next_tu) ParseTranslationUnit(d);
+    else             ParseTranslationUnit(d, d->next_tu.get(), true);
+  }
+
+  void ParseTranslationUnitDone(MyEditorDialog *d, TranslationUnit *tu, bool replace) {
+    ClangCPlusPlusHighlighter::UpdateAnnotation(&d->view, tu);
+    d->view.RefreshLines();
+    d->view.Redraw();
+    swap(d->main_tu, d->next_tu);
+    if (replace) d->main_tu = unique_ptr<TranslationUnit>(tu);
+    d->parsing = false;
+  }
+
+  void CompleteCode() {
+    MyEditorDialog *d = Top();
+    if (!d || !d->main_tu || !d->view.cursor_offset) return;
+    void *ret = d->main_tu->CompleteCode(opened_files, d->view.cursor_line_index, d->view.cursor.i.x);
   }
 
   void GotoDefinition() {
-    Editor *e = Top();
-    if (!e || !e->tu || !e->cursor_offset) return;
-    auto fo = e->tu->FindDefinition(e->file->Filename(), e->cursor_offset->offset + e->cursor.i.x);
+    MyEditorDialog *d = Top();
+    if (!d || !d->main_tu || !d->view.cursor_offset) return;
+    auto fo = d->main_tu->FindDefinition(d->view.file->Filename(), d->view.cursor_offset->offset + d->view.cursor.i.x);
     if (fo.fn.empty()) return;
     INFO("Editor GotoDefinition ", fo.fn, " ", fo.offset, " ", fo.y, " ", fo.x);
     auto editor = Open(fo.fn);
@@ -231,7 +272,7 @@ struct EditorGUI : public GUI {
 
   void GotoLine(const string &line) {
     if (line.empty()) app->LaunchNativePanel("gotoline");
-    else if (Editor *e = Top()) e->ScrollTo(atoi(line)-1, 0);
+    else if (MyEditorDialog *d = Top()) d->view.ScrollTo(atoi(line)-1, 0);
   }
 
   void Find(const string &line) {
@@ -250,10 +291,10 @@ struct EditorGUI : public GUI {
   }
 
   void Tidy() {
-    Editor *e = Top();
+    MyEditorDialog *d = Top();
     if (bottom_divider.size < screen->default_font->Height()) ShowBuildTerminal();
-    if (build_process.in || !e) return;
-    string tidy_bin = StrCat(FLAGS_llvm_dir, "/bin/clang-tidy"), src_file = e->file->Filename(),
+    if (build_process.in || !d) return;
+    string tidy_bin = StrCat(FLAGS_llvm_dir, "/bin/clang-tidy"), src_file = d->view.file->Filename(),
            build_dir = my_app->project->build_dir;
     vector<const char*> argv{ tidy_bin.c_str(), "-p", build_dir.c_str(), src_file.c_str(), nullptr };
     CHECK(!build_process.Open(&argv[0], build_dir.c_str()));
@@ -261,6 +302,19 @@ struct EditorGUI : public GUI {
       (fileno(build_process.in), new Connection::CallbackHandler
        ([=](Connection *c){ build_terminal->Write(c->rb.buf); c->ReadFlush(c->rb.size()); },
         [=](Connection *c){ build_process.Close(); })); });
+  }
+
+  void DiffUnsavedChanges() {
+    MyEditorDialog *d = Top();
+    if (!d) return;
+    BufferFile current(string(""));
+    d->view.SaveTo(&current);
+    diff_match_patch<string> dmp;
+    OpenFile(new BufferFile(dmp.patch_toText(dmp.patch_make(d->view.file->Contents(), current.buf)),
+                            StrCat(d->view.file->Filename(), ".diff").c_str()));
+  }
+
+  void DiffCVS() {
   }
 };
 
@@ -275,14 +329,14 @@ void MyWindowStart(Window *W) {
   EditorGUI *editor_gui = W->ReplaceGUI(0, make_unique<EditorGUI>());
   if (FLAGS_console) W->InitConsole(bind(&EditorGUI::OnConsoleAnimating, editor_gui));
   W->frame_cb = bind(&EditorGUI::Frame, editor_gui, _1, _2, _3);
-  W->default_textbox = [=](){ return editor_gui->Top(); };
+  W->default_textbox = [=](){ auto t = editor_gui->Top(); return t ? &t->view : nullptr; };
 
   W->shell = make_unique<Shell>(nullptr, nullptr, nullptr);
   W->shell->Add("choose",       [=](const vector<string>&) { app->LaunchNativeFileChooser(1,0,0,"open"); });
-  W->shell->Add("save",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->Save();             app->scheduler.Wakeup(0); });
-  W->shell->Add("wrap",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->ToggleShouldWrap(); app->scheduler.Wakeup(0); });
-  W->shell->Add("undo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->WalkUndo(true);     app->scheduler.Wakeup(0); });
-  W->shell->Add("redo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->WalkUndo(false);    app->scheduler.Wakeup(0); });
+  W->shell->Add("save",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.Save();                        app->scheduler.Wakeup(0); });
+  W->shell->Add("wrap",         [=](const vector<string>&a){ if (auto t = editor_gui->Top()) t->view.SetWrapMode(a.size()?a[0]:""); app->scheduler.Wakeup(0); });
+  W->shell->Add("undo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.WalkUndo(true);                app->scheduler.Wakeup(0); });
+  W->shell->Add("redo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.WalkUndo(false);               app->scheduler.Wakeup(0); });
   W->shell->Add("gotodef",      [=](const vector<string>&a){ editor_gui->GotoDefinition();          app->scheduler.Wakeup(0); });
   W->shell->Add("open",         [=](const vector<string>&a){ editor_gui->Open(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
   W->shell->Add("find",         [=](const vector<string>&a){ editor_gui->Find(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
@@ -291,6 +345,8 @@ void MyWindowStart(Window *W) {
   W->shell->Add("tidy",         [=](const vector<string>&) { editor_gui->Tidy();                    app->scheduler.Wakeup(0); });
   W->shell->Add("show_project", [=](const vector<string>&) { editor_gui->ShowProjectExplorer();     app->scheduler.Wakeup(0); });
   W->shell->Add("show_build",   [=](const vector<string>&) { editor_gui->ShowBuildTerminal();       app->scheduler.Wakeup(0); });
+  W->shell->Add("diff_unsaved", [=](const vector<string>&) { editor_gui->DiffUnsavedChanges();      app->scheduler.Wakeup(0); });
+  W->shell->Add("diff_cvs",     [=](const vector<string>&) { editor_gui->DiffCVS();                 app->scheduler.Wakeup(0); });
 
   BindMap *binds = W->AddInputController(make_unique<BindMap>());
   binds->Add('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, W->shell.get(), vector<string>())));
@@ -336,14 +392,15 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
     {"b", "Build", "build"}, {"", "Tidy", "tidy"} });
 
   app->AddNativeEditMenu({ {"z", "Undo", "undo"}, {"y", "Redo", "redo"},
-    {"f", "Find", "find"}, {"g", "Goto", "gotoline"} });
+    {"f", "Find", "find"}, {"g", "Goto", "gotoline"}, {"", "Diff unsaved", "diff_unsaved"},
+    {"", StrCat(FLAGS_cvs_cmd, " diff"), "diff_cvs"} });
 
   app->AddNativeMenu("View", { {"=", "Zoom In", ""}, {"-", "Zoom Out", ""},
-     {"w", "Wrap lines", "wrap"}, {"", "Show Project Explorer", "show_project"},
-     {"", "Show Build Console", "show_build"} });
+    {"", "No wrap", "wrap none"}, {"", "Line wrap", "wrap lines"}, {"", "Word wrap", "wrap words"}, 
+    {"", "Show Project Explorer", "show_project"}, {"", "Show Build Console", "show_build"} });
 
   app->AddNativePanel("gotoline", Box(0, 0, 200, 60), "Goto line number", {
-     { "textbox", Box(20, 20, 160, 20), "gotoline" } });
+    { "textbox", Box(20, 20, 160, 20), "gotoline" } });
 
   if (FLAGS_project.size()) {
     my_app->project = make_unique<IDEProject>(FLAGS_project);
