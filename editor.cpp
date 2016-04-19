@@ -41,16 +41,18 @@ struct MyAppState {
 
 struct MyEditorDialog : public EditorDialog {
   unique_ptr<TranslationUnit> main_tu, next_tu;
+  vector<Flow::TextAnnotation> main_annotation, next_annotation;
   bool parsing=0, needs_reparse=0;
   int reparsed=0;
   using EditorDialog::EditorDialog;
+  virtual ~MyEditorDialog() {}
 };
 
 struct EditorGUI : public GUI {
   static const int init_right_divider_w=224;
   Box top_center_pane, bottom_center_pane, left_pane, right_pane;
   Widget::Divider bottom_divider, right_divider;
-  unordered_map<string, shared_ptr<EditorDialog>> opened_files;
+  unordered_map<string, shared_ptr<MyEditorDialog>> opened_files;
   TabbedDialogInterface *right_pane_tabs=0;
   TabbedDialog<MyEditorDialog> source_tabs;
   TabbedDialog<Dialog> project_tabs;
@@ -129,9 +131,8 @@ struct EditorGUI : public GUI {
     string fn = PrefixMatch(fin, prefix) ? fin.substr(prefix.size()) : fin;
     auto opened = opened_files.find(fn);
     if (opened != opened_files.end()) {
-      auto ret = dynamic_cast<MyEditorDialog*>(opened->second.get());
-      source_tabs.SelectTab(ret);
-      return ret;
+      source_tabs.SelectTab(opened->second.get());
+      return opened->second.get();
     }
     INFO("Editor Open ", fn);
     return OpenFile(new LocalFile(fn, "r"));
@@ -145,10 +146,15 @@ struct EditorGUI : public GUI {
     source_tabs.AddTab(editor);
     child_box.Clear();
 
+    e->UpdateMapping(0);
+    ParseTranslationUnit(FindOrDie(opened_files, e->file->Filename())); 
     e->modified_cb = [=]{ app->scheduler.WakeupIn(0, Seconds(1), true); };
     e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
     e->tab_cb = bind(&EditorGUI::CompleteCode, this);
-    ParseTranslationUnit(editor);
+    e->annotation_cb = [=](const Editor::LineOffset *o){
+      return o->main_tu_line < 0 ? Flow::TextAnnotation() : editor->main_annotation[o->main_tu_line];
+    };
+
     e->line.SetAttrSource(&editor->view.style);
     e->SetSyntax(Singleton<Editor::Base16DefaultDarkSyntaxColors>::Get());
     e->InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
@@ -156,6 +162,14 @@ struct EditorGUI : public GUI {
 
     editor->deleted_cb = [=](){ source_tabs.DelTab(editor); child_box.Clear(); opened_files.erase(fn); };
     return editor;
+  }
+
+  TranslationUnit::OpenedFiles MakeOpenedFilesVector() const {
+    TranslationUnit::OpenedFiles opened;
+    for (auto &i : opened_files)
+      if (i.second->view.CacheModifiedText())
+        opened.emplace_back(i.first, i.second->view.cached_text);
+    return opened;
   }
 
   void Layout() {
@@ -183,8 +197,10 @@ struct EditorGUI : public GUI {
     }
     Time now = Now();
     MyEditorDialog *d = Top();
-    if (d && d->view.modified != Time(0) &&
-        d->view.modified + Seconds(1) <= now) { d->view.modified = Time(0); ReparseTranslationUnit(d); }
+    if (d && d->view.modified != Time(0) && d->view.modified + Seconds(1) <= now) {
+      d->view.modified = Time(0); 
+      ReparseTranslationUnit(FindOrDie(opened_files, d->view.file->Filename())); 
+    }
 
     W->gd->DisableBlend();
     if (bottom_divider.changed || right_divider.changed) Layout();
@@ -212,7 +228,7 @@ struct EditorGUI : public GUI {
     // next identation is x + abs_bracks
   }
   
-  void ParseTranslationUnit(MyEditorDialog *d) {
+  void ParseTranslationUnit(shared_ptr<MyEditorDialog> d) {
     string filename = d->view.file->Filename(), compile_cmd, compile_dir;
     if (!my_app->project->GetCompileCommand(filename, &compile_cmd, &compile_dir)) {
       if (!FileSuffix::CPP(filename)) return ERROR("no compile command for ", filename);
@@ -226,44 +242,48 @@ struct EditorGUI : public GUI {
     ParseTranslationUnit(d, new TranslationUnit(filename, compile_cmd, compile_dir), false);
   }
 
-  void ParseTranslationUnit(MyEditorDialog *d, TranslationUnit *tu, bool reparse) {
+  void ParseTranslationUnit(shared_ptr<MyEditorDialog> d, TranslationUnit *tu, bool reparse) {
     d->reparsed++;
     d->parsing = true;
     d->needs_reparse = false;
-    auto opened = opened_files;
+    auto opened = MakeOpenedFilesVector();
+    for (auto i = d->view.file_line.Begin(); i.ind; ++i) i.val->next_tu_line = i.GetIndex();
     app->RunInThreadPool([=](){
       if (reparse) tu->Reparse(opened);
       else         tu->Parse(opened);
-      app->RunInMainThread(bind(&EditorGUI::ParseTranslationUnitDone, this, d, tu, !reparse)); 
+      ClangCPlusPlusHighlighter::UpdateAnnotation(tu, d->view.syntax, d->view.default_attr, &d->next_annotation);
+      app->RunInMainThread([=](){ HandleParseTranslationUnitDone(d, tu, !reparse); });
     });
   }
 
-  void ReparseTranslationUnit(MyEditorDialog *d) {
+  void ReparseTranslationUnit(shared_ptr<MyEditorDialog> d) {
     if (d->parsing) { d->needs_reparse = true; return; }
     if (d->next_tu && d->next_tu->parse_failed) d->next_tu.reset();
     if (!d->next_tu) ParseTranslationUnit(d);
     else             ParseTranslationUnit(d, d->next_tu.get(), true);
   }
 
-  void ParseTranslationUnitDone(MyEditorDialog *d, TranslationUnit *tu, bool replace) {
-    ClangCPlusPlusHighlighter::UpdateAnnotation(&d->view, tu);
+  void HandleParseTranslationUnitDone(shared_ptr<MyEditorDialog> d, TranslationUnit *tu, bool replace) {
+    if (!app->run) return;
+    swap(d->main_tu, d->next_tu);
+    swap(d->main_annotation, d->next_annotation);
+    if (replace) d->main_tu = unique_ptr<TranslationUnit>(tu);
+    for (auto i = d->view.file_line.Begin(); i.ind; ++i) swap(i.val->main_tu_line, i.val->next_tu_line);
     d->view.RefreshLines();
     d->view.Redraw();
-    swap(d->main_tu, d->next_tu);
-    if (replace) d->main_tu = unique_ptr<TranslationUnit>(tu);
     d->parsing = false;
   }
 
   void CompleteCode() {
     MyEditorDialog *d = Top();
     if (!d || !d->main_tu || !d->view.cursor_offset) return;
-    void *ret = d->main_tu->CompleteCode(opened_files, d->view.cursor_line_index, d->view.cursor.i.x);
+    void *ret = d->main_tu->CompleteCode(MakeOpenedFilesVector(), d->view.cursor_line_index, d->view.cursor.i.x);
   }
 
   void GotoDefinition() {
     MyEditorDialog *d = Top();
     if (!d || !d->main_tu || !d->view.cursor_offset) return;
-    auto fo = d->main_tu->FindDefinition(d->view.file->Filename(), d->view.cursor_offset->offset + d->view.cursor.i.x);
+    auto fo = d->main_tu->FindDefinition(d->view.file->Filename(), d->view.cursor_offset->file_offset + d->view.cursor.i.x);
     if (fo.fn.empty()) return;
     INFO("Editor GotoDefinition ", fo.fn, " ", fo.offset, " ", fo.y, " ", fo.x);
     auto editor = Open(fo.fn);
