@@ -408,19 +408,19 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
     CHECK(app->CreateNetworkThread(false, true));
   }
 
-  app->AddNativeMenu("File", { {"o", "Open", "choose"}, {"s", "Save", "save" },
-    {"b", "Build", "build"}, {"", "Tidy", "tidy"} });
+  app->AddNativeMenu("File", { MenuItem{"o", "Open", "choose"}, MenuItem{"s", "Save", "save" },
+    MenuItem{"b", "Build", "build"}, MenuItem{"", "Tidy", "tidy"} });
 
-  app->AddNativeEditMenu({ {"z", "Undo", "undo"}, {"y", "Redo", "redo"},
-    {"f", "Find", "find"}, {"g", "Goto", "gotoline"}, {"", "Diff unsaved", "diff_unsaved"},
-    {"", StrCat(FLAGS_cvs_cmd, " diff"), "diff_cvs"} });
+  app->AddNativeEditMenu({ MenuItem{"z", "Undo", "undo"}, MenuItem{"y", "Redo", "redo"},
+    MenuItem{"f", "Find", "find"}, MenuItem{"g", "Goto", "gotoline"}, MenuItem{"", "Diff unsaved", "diff_unsaved"},
+    MenuItem{"", StrCat(FLAGS_cvs_cmd, " diff"), "diff_cvs"} });
 
-  app->AddNativeMenu("View", { {"=", "Zoom In", ""}, {"-", "Zoom Out", ""},
-    {"", "No wrap", "wrap none"}, {"", "Line wrap", "wrap lines"}, {"", "Word wrap", "wrap words"}, 
-    {"", "Show Project Explorer", "show_project"}, {"", "Show Build Console", "show_build"} });
+  app->AddNativeMenu("View", { MenuItem{"=", "Zoom In", ""}, MenuItem{"-", "Zoom Out", ""},
+    MenuItem{"", "No wrap", "wrap none"}, MenuItem{"", "Line wrap", "wrap lines"}, MenuItem{"", "Word wrap", "wrap words"}, 
+    MenuItem{"", "Show Project Explorer", "show_project"}, MenuItem{"", "Show Build Console", "show_build"} });
 
   app->AddNativePanel("gotoline", Box(0, 0, 200, 60), "Goto line number", {
-    { "textbox", Box(20, 20, 160, 20), "gotoline" } });
+    PanelItem{ "textbox", Box(20, 20, 160, 20), "gotoline" } });
 
   if (FLAGS_project.size()) {
     my_app->project = make_unique<IDEProject>(FLAGS_project);
