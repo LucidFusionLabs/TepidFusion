@@ -48,6 +48,25 @@ struct MyEditorDialog : public EditorDialog {
   virtual ~MyEditorDialog() {}
 };
 
+struct CodeCompletionsView : public PropertyView {
+  unique_ptr<TranslationUnit::CodeCompletions> completions;
+  mutable Node node;
+  using PropertyView::PropertyView;
+
+  Node* GetNode(Id id) { const auto *self = this; return const_cast<Node*>(self->GetNode(id)); }
+  const Node* GetNode(Id id) const {
+    node.text = completions ? completions->GetText(id-1) : string();
+    return &node;
+  }
+  void VisitExpandedChildren(Id id, const Node::Visitor &cb, int depth) {
+    if (!id) for (int i = 0, l = completions ? completions->size() : 0; i != l; ++i) cb(i+1, 0, 0);
+  }
+};
+
+struct CodeCompletionsViewDialog : public TextViewDialogT<CodeCompletionsView> {
+  using TextViewDialogT::TextViewDialogT;
+};
+
 struct EditorGUI : public GUI {
   static const int init_right_divider_w=224;
   Box top_center_pane, bottom_center_pane, left_pane, right_pane;
@@ -59,6 +78,7 @@ struct EditorGUI : public GUI {
   TabbedDialog<PropertyTreeDialog> options_tabs;
   DirectoryTreeDialog dir_tree;
   PropertyTreeDialog targets_tree, options_tree;
+  CodeCompletionsViewDialog code_completions;
   unique_ptr<Terminal> build_terminal;
   vector<MenuItem> source_context_menu{ MenuItem{ "", "Go To Definition", "gotodef" } };
   vector<MenuItem> dir_context_menu{ MenuItem{ "b", "Build", "build" } };
@@ -70,17 +90,18 @@ struct EditorGUI : public GUI {
   EditorGUI() :
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
     source_tabs(this), project_tabs(this), options_tabs(this),
-    dir_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    targets_tree(screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    options_tree(screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)) {
+    dir_tree        (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
+    targets_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
+    options_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
+    code_completions(screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)) {
     Activate(); 
 
     dir_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (my_app->project) dir_tree.title_text = "Source";
     if (my_app->project) dir_tree.view.Open(StrCat(my_app->project->source_dir, LocalFile::Slash));
     dir_tree.view.InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(dir_context_menu); }));
-    dir_tree.view.selected_line_clicked_cb = [&](PropertyTree *t, PropertyTree::Id id) {
-      if (auto n = &t->tree[id-1]) if (n->val.size() && n->val.back() != '/') Open(n->val);
+    dir_tree.view.selected_line_clicked_cb = [&](PropertyView *v, PropertyTree::Id id) {
+      if (auto n = v->GetNode(id)) if (n->val.size() && n->val.back() != '/') Open(n->val);
     };
     project_tabs.AddTab(&dir_tree);
     screen->gui.push_back(&dir_tree);
@@ -102,6 +123,7 @@ struct EditorGUI : public GUI {
     if (my_app->project) options_tree.title_text = "Options";
     options_tabs.AddTab(&options_tree);
     screen->gui.push_back(&options_tree);
+    screen->gui.push_back(&code_completions);
 
     build_terminal = make_unique<Terminal>(nullptr, screen->gd, screen->default_font);
     build_terminal->newline_mode = true;
@@ -213,6 +235,7 @@ struct EditorGUI : public GUI {
     if (right_pane.w) right_pane_tabs->Draw();
     if (right_divider.changing) BoxOutline().Draw(Box::DelBorder(right_pane, Border(1,1,1,1)));
     if (bottom_divider.changing) BoxOutline().Draw(Box::DelBorder(bottom_center_pane, Border(1,1,1,1)));
+    if (code_completions.view.active) code_completions.Draw();
     W->DrawDialogs();
     return 0;
   }
@@ -277,13 +300,18 @@ struct EditorGUI : public GUI {
   void CompleteCode() {
     MyEditorDialog *d = Top();
     if (!d || !d->main_tu || !d->view.cursor_offset) return;
-    void *ret = d->main_tu->CompleteCode(MakeOpenedFilesVector(), d->view.cursor_line_index, d->view.cursor.i.x);
+    code_completions.view.completions =
+      d->main_tu->CompleteCode(MakeOpenedFilesVector(), d->view.cursor_line_index, d->view.cursor.i.x);
+    code_completions.view.RefreshLines();
+    code_completions.view.Redraw();
+    code_completions.view.active = true;
+    for (int i=0; i<10; i++) INFO("y0y0 ", i, " = ", code_completions.view.completions->GetText(i));
   }
 
   void GotoDefinition() {
     MyEditorDialog *d = Top();
-    if (!d || !d->main_tu || !d->view.cursor_offset) return;
-    auto fo = d->main_tu->FindDefinition(d->view.file->Filename(), d->view.cursor_offset->file_offset + d->view.cursor.i.x);
+    if (!d || !d->main_tu || !d->view.cursor_offset || d->view.cursor_offset->main_tu_line < 0) return;
+    auto fo = d->main_tu->FindDefinition(d->view.file->Filename(), d->view.cursor_offset->main_tu_line, d->view.cursor.i.x);
     if (fo.fn.empty()) return;
     INFO("Editor GotoDefinition ", fo.fn, " ", fo.offset, " ", fo.y, " ", fo.x);
     auto editor = Open(fo.fn);
@@ -296,6 +324,14 @@ struct EditorGUI : public GUI {
   }
 
   void Find(const string &line) {
+    MyEditorDialog *d = Top();
+    if (line.empty() || !d) return app->LaunchNativePanel("find");
+    CHECK(d->view.CacheModifiedText(true));
+    printf("find '%s'\n", line.c_str());
+    vector<Regex::Result> matches;
+    Regex matcher(line);
+    matcher.MatchAll(d->view.cached_text->buf, &matches);
+    for (auto &m : matches) printf("matched '%s'\n", m.Text(d->view.cached_text->buf).c_str());
   }
 
   void Build() {
@@ -418,6 +454,9 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
   app->AddNativeMenu("View", { MenuItem{"=", "Zoom In", ""}, MenuItem{"-", "Zoom Out", ""},
     MenuItem{"", "No wrap", "wrap none"}, MenuItem{"", "Line wrap", "wrap lines"}, MenuItem{"", "Word wrap", "wrap words"}, 
     MenuItem{"", "Show Project Explorer", "show_project"}, MenuItem{"", "Show Build Console", "show_build"} });
+
+  app->AddNativePanel("find", Box(0, 0, 200, 60), "Find", {
+    PanelItem{ "textbox", Box(20, 20, 160, 20), "find" } });
 
   app->AddNativePanel("gotoline", Box(0, 0, 200, 60), "Goto line number", {
     PanelItem{ "textbox", Box(20, 20, 160, 20), "gotoline" } });
