@@ -29,6 +29,9 @@ DEFINE_string(llvm_dir,        "/Users/p/llvm", "LLVM toolchain");
 DEFINE_string(cvs_cmd,         "git",           "CVS command, ie git");
 DEFINE_string(cmake_daemon,    "bin/cmake",     "CMake daemon");
 DEFINE_string(default_project, "",              "Default project");
+DEFINE_bool  (regex_highlight, true,            "Use Regex syntax matcher");
+DEFINE_bool  (clang_highlight, true,            "Use Clang syntax matcher");
+
 extern FlagOfType<bool> FLAGS_lfapp_network_;
 
 struct MyAppState {
@@ -41,30 +44,12 @@ struct MyAppState {
 
 struct MyEditorDialog : public EditorDialog {
   unique_ptr<TranslationUnit> main_tu, next_tu;
-  vector<Flow::TextAnnotation> main_annotation, next_annotation;
+  vector<DrawableAnnotation> main_annotation, next_annotation;
+  vector<pair<int, int>> find_results;
   bool parsing=0, needs_reparse=0;
-  int reparsed=0;
+  int reparsed=0, find_results_ind=0;
   using EditorDialog::EditorDialog;
   virtual ~MyEditorDialog() {}
-};
-
-struct CodeCompletionsView : public PropertyView {
-  unique_ptr<TranslationUnit::CodeCompletions> completions;
-  mutable Node node;
-  using PropertyView::PropertyView;
-
-  Node* GetNode(Id id) { const auto *self = this; return const_cast<Node*>(self->GetNode(id)); }
-  const Node* GetNode(Id id) const {
-    node.text = completions ? completions->GetText(id-1) : string();
-    return &node;
-  }
-  void VisitExpandedChildren(Id id, const Node::Visitor &cb, int depth) {
-    if (!id) for (int i = 0, l = completions ? completions->size() : 0; i != l; ++i) cb(i+1, 0, 0);
-  }
-};
-
-struct CodeCompletionsViewDialog : public TextViewDialogT<CodeCompletionsView> {
-  using TextViewDialogT::TextViewDialogT;
 };
 
 struct EditorGUI : public GUI {
@@ -86,6 +71,7 @@ struct EditorGUI : public GUI {
   ProcessPipe build_process;
   CMakeDaemon cmakedaemon;
   CMakeDaemon::TargetInfo default_project;
+  RegexCPlusPlusHighlighter regex_highlighter;
 
   EditorGUI() :
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
@@ -174,8 +160,14 @@ struct EditorGUI : public GUI {
     e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
     e->tab_cb = bind(&EditorGUI::CompleteCode, this);
     e->annotation_cb = [=](const Editor::LineOffset *o){
-      return o->main_tu_line < 0 ? Flow::TextAnnotation() : editor->main_annotation[o->main_tu_line];
+      return o->main_tu_line < 0 ? DrawableAnnotation() : editor->main_annotation[o->main_tu_line];
     };
+    if (FLAGS_regex_highlight) {
+      editor->main_annotation.resize(e->file_line.size());
+      for (auto &i : editor->main_annotation) i.clear();
+      regex_highlighter.UpdateAnnotation
+        (e->cached_text->buf, e->syntax, e->default_attr, &editor->main_annotation[0], editor->main_annotation.size());
+    }
 
     e->line.SetAttrSource(&editor->view.style);
     e->SetSyntax(Singleton<Editor::Base16DefaultDarkSyntaxColors>::Get());
@@ -274,7 +266,8 @@ struct EditorGUI : public GUI {
     app->RunInThreadPool([=](){
       if (reparse) tu->Reparse(opened);
       else         tu->Parse(opened);
-      ClangCPlusPlusHighlighter::UpdateAnnotation(tu, d->view.syntax, d->view.default_attr, &d->next_annotation);
+      if (FLAGS_clang_highlight)
+        ClangCPlusPlusHighlighter::UpdateAnnotation(tu, d->view.syntax, d->view.default_attr, &d->next_annotation);
       app->RunInMainThread([=](){ HandleParseTranslationUnitDone(d, tu, !reparse); });
     });
   }
@@ -327,11 +320,21 @@ struct EditorGUI : public GUI {
     MyEditorDialog *d = Top();
     if (line.empty() || !d) return app->LaunchNativePanel("find");
     CHECK(d->view.CacheModifiedText(true));
-    printf("find '%s'\n", line.c_str());
-    vector<Regex::Result> matches;
-    Regex matcher(line);
-    matcher.MatchAll(d->view.cached_text->buf, &matches);
-    for (auto &m : matches) printf("matched '%s'\n", m.Text(d->view.cached_text->buf).c_str());
+    d->find_results.clear();
+    Regex regex(line);
+    RegexLineMatcher(&regex, d->view.cached_text->buf).MatchAll(&d->find_results);
+    if (!d->find_results.size()) return app->SetNativePanelTitle("find", "Find");
+    d->find_results_ind = -1;
+    FindPrevOrNext(false);
+  }
+
+  void FindPrevOrNext(bool prev) {
+    MyEditorDialog *d = Top();
+    if (!d || !d->find_results.size()) return;
+    d->find_results_ind = RingIndex::Wrap(d->find_results_ind + (prev ? -1 : 1), d->find_results.size());
+    const auto &r = d->find_results[d->find_results_ind];
+    d->view.ScrollTo(r.first, r.second);
+    app->SetNativePanelTitle("find", StrCat("Find [", d->find_results_ind+1, " of ", d->find_results.size(), "]"));
   }
 
   void Build() {
@@ -395,8 +398,10 @@ void MyWindowStart(Window *W) {
   W->shell->Add("redo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.WalkUndo(false);               app->scheduler.Wakeup(0); });
   W->shell->Add("gotodef",      [=](const vector<string>&a){ editor_gui->GotoDefinition();          app->scheduler.Wakeup(0); });
   W->shell->Add("open",         [=](const vector<string>&a){ editor_gui->Open(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
-  W->shell->Add("find",         [=](const vector<string>&a){ editor_gui->Find(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
   W->shell->Add("gotoline",     [=](const vector<string>&a){ editor_gui->GotoLine(a.size()?a[0]:"");app->scheduler.Wakeup(0); });
+  W->shell->Add("find",         [=](const vector<string>&a){ editor_gui->Find(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
+  W->shell->Add("findprev",     [=](const vector<string>&) { editor_gui->FindPrevOrNext(true);      app->scheduler.Wakeup(0); });
+  W->shell->Add("findnext",     [=](const vector<string>&) { editor_gui->FindPrevOrNext(false);     app->scheduler.Wakeup(0); });
   W->shell->Add("build",        [=](const vector<string>&) { editor_gui->Build();                   app->scheduler.Wakeup(0); });
   W->shell->Add("tidy",         [=](const vector<string>&) { editor_gui->Tidy();                    app->scheduler.Wakeup(0); });
   W->shell->Add("show_project", [=](const vector<string>&) { editor_gui->ShowProjectExplorer();     app->scheduler.Wakeup(0); });
@@ -455,8 +460,11 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
     MenuItem{"", "No wrap", "wrap none"}, MenuItem{"", "Line wrap", "wrap lines"}, MenuItem{"", "Word wrap", "wrap words"}, 
     MenuItem{"", "Show Project Explorer", "show_project"}, MenuItem{"", "Show Build Console", "show_build"} });
 
-  app->AddNativePanel("find", Box(0, 0, 200, 60), "Find", {
-    PanelItem{ "textbox", Box(20, 20, 160, 20), "find" } });
+  app->AddNativePanel("find", Box(0, 0, 300, 60), "Find", {
+    PanelItem{ "textbox", Box(20, 20, 160, 20), "find" }, 
+    PanelItem{ "button:<", Box(200, 20, 40, 20), "findprev" },
+    PanelItem{ "button:>", Box(240, 20, 40, 20), "findnext" }
+  });
 
   app->AddNativePanel("gotoline", Box(0, 0, 200, 60), "Goto line number", {
     PanelItem{ "textbox", Box(20, 20, 160, 20), "gotoline" } });
