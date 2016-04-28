@@ -30,7 +30,7 @@ DEFINE_string(cvs_cmd,         "git",           "CVS command, ie git");
 DEFINE_string(cmake_daemon,    "bin/cmake",     "CMake daemon");
 DEFINE_string(default_project, "",              "Default project");
 DEFINE_bool  (regex_highlight, true,            "Use Regex syntax matcher");
-DEFINE_bool  (clang_highlight, true,            "Use Clang syntax matcher");
+DEFINE_bool  (clang_highlight, false,           "Use Clang syntax matcher");
 
 extern FlagOfType<bool> FLAGS_lfapp_network_;
 
@@ -39,6 +39,7 @@ struct MyAppState {
   unique_ptr<IDEProject> project;
   SearchPaths search_paths;
   string build_bin;
+  Editor::SyntaxColors *cpp_colors = Singleton<Editor::Base16DefaultDarkSyntaxColors>::Get();
   MyAppState() : search_paths(getenv("PATH")), build_bin(search_paths.Find("make")) {}
 } *my_app;
 
@@ -71,7 +72,7 @@ struct EditorGUI : public GUI {
   ProcessPipe build_process;
   CMakeDaemon cmakedaemon;
   CMakeDaemon::TargetInfo default_project;
-  RegexCPlusPlusHighlighter regex_highlighter;
+  RegexCPlusPlusHighlighter cpp_highlighter;
 
   EditorGUI() :
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
@@ -79,7 +80,8 @@ struct EditorGUI : public GUI {
     dir_tree        (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
     targets_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
     options_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    code_completions(screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)) {
+    code_completions(screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
+    cpp_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)) {
     Activate(); 
 
     dir_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
@@ -156,6 +158,9 @@ struct EditorGUI : public GUI {
 
     e->UpdateMapping(0);
     ParseTranslationUnit(FindOrDie(opened_files, e->file->Filename())); 
+    e->line.SetAttrSource(&e->style);
+    e->SetColors(my_app->cpp_colors);
+    e->InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
     e->modified_cb = [=]{ app->scheduler.WakeupIn(0, Seconds(1), true); };
     e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
     e->tab_cb = bind(&EditorGUI::CompleteCode, this);
@@ -163,15 +168,11 @@ struct EditorGUI : public GUI {
       return o->main_tu_line < 0 ? DrawableAnnotation() : editor->main_annotation[o->main_tu_line];
     };
     if (FLAGS_regex_highlight) {
+      CHECK(e->CacheModifiedText(true));
       editor->main_annotation.resize(e->file_line.size());
-      for (auto &i : editor->main_annotation) i.clear();
-      regex_highlighter.UpdateAnnotation
-        (e->cached_text->buf, e->syntax, e->default_attr, &editor->main_annotation[0], editor->main_annotation.size());
+      cpp_highlighter.UpdateAnnotation
+        (e->cached_text->buf, &editor->main_annotation[0], editor->main_annotation.size());
     }
-
-    e->line.SetAttrSource(&editor->view.style);
-    e->SetSyntax(Singleton<Editor::Base16DefaultDarkSyntaxColors>::Get());
-    e->InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
     if (source_tabs.box.h) e->CheckResized(Box(source_tabs.box.w, source_tabs.box.h-source_tabs.tab_dim.y));
 
     editor->deleted_cb = [=](){ source_tabs.DelTab(editor); child_box.Clear(); opened_files.erase(fn); };
@@ -267,7 +268,7 @@ struct EditorGUI : public GUI {
       if (reparse) tu->Reparse(opened);
       else         tu->Parse(opened);
       if (FLAGS_clang_highlight)
-        ClangCPlusPlusHighlighter::UpdateAnnotation(tu, d->view.syntax, d->view.default_attr, &d->next_annotation);
+        ClangCPlusPlusHighlighter::UpdateAnnotation(tu, my_app->cpp_colors, d->view.default_attr, &d->next_annotation);
       app->RunInMainThread([=](){ HandleParseTranslationUnitDone(d, tu, !reparse); });
     });
   }
@@ -282,7 +283,7 @@ struct EditorGUI : public GUI {
   void HandleParseTranslationUnitDone(shared_ptr<MyEditorDialog> d, TranslationUnit *tu, bool replace) {
     if (!app->run) return;
     swap(d->main_tu, d->next_tu);
-    swap(d->main_annotation, d->next_annotation);
+    if (FLAGS_clang_highlight) swap(d->main_annotation, d->next_annotation);
     if (replace) d->main_tu = unique_ptr<TranslationUnit>(tu);
     for (auto i = d->view.file_line.Begin(); i.ind; ++i) swap(i.val->main_tu_line, i.val->next_tu_line);
     d->view.RefreshLines();
