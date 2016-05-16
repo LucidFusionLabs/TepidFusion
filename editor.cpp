@@ -18,6 +18,7 @@
 
 #include "core/app/gui.h"
 #include "core/app/ipc.h"
+#include "core/app/types/syntax.h"
 #include "core/app/bindings/ide.h"
 #include "core/imports/diff-match-patch-cpp-stl/diff_match_patch.h"
 
@@ -29,10 +30,11 @@ DEFINE_string(llvm_dir,        "/Users/p/llvm", "LLVM toolchain");
 DEFINE_string(cvs_cmd,         "git",           "CVS command, ie git");
 DEFINE_string(cmake_daemon,    "bin/cmake",     "CMake daemon");
 DEFINE_string(default_project, "",              "Default project");
-DEFINE_bool  (regex_highlight, true,            "Use Regex syntax matcher");
+DEFINE_bool  (clang,           true,            "Use libclang");
 DEFINE_bool  (clang_highlight, false,           "Use Clang syntax matcher");
+DEFINE_bool  (regex_highlight, true,            "Use Regex syntax matcher");
 
-extern FlagOfType<bool> FLAGS_lfapp_network_;
+extern FlagOfType<bool> FLAGS_enable_network_;
 
 struct MyAppState {
   vector<string> save_settings = { "default_project" };
@@ -66,7 +68,8 @@ struct EditorGUI : public GUI {
   PropertyTreeDialog targets_tree, options_tree;
   CodeCompletionsViewDialog code_completions;
   unique_ptr<Terminal> build_terminal;
-  vector<MenuItem> source_context_menu{ MenuItem{ "", "Go To Definition", "gotodef" } };
+  vector<MenuItem> source_context_menu{ MenuItem{ "", "Go To Brace", "gotobrace" },
+    MenuItem{ "", "Go To Definition", "gotodef" } };
   vector<MenuItem> dir_context_menu{ MenuItem{ "b", "Build", "build" } };
   bool console_animating = 0;
   ProcessPipe build_process;
@@ -156,22 +159,29 @@ struct EditorGUI : public GUI {
     source_tabs.AddTab(editor);
     child_box.Clear();
 
-    e->UpdateMapping(0);
-    ParseTranslationUnit(FindOrDie(opened_files, e->file->Filename())); 
+    e->UpdateMapping(0, FLAGS_regex_highlight);
+    if (FLAGS_clang) ParseTranslationUnit(FindOrDie(opened_files, e->file->Filename())); 
     e->line.SetAttrSource(&e->style);
     e->SetColors(my_app->cpp_colors);
     e->InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
     e->modified_cb = [=]{ app->scheduler.WakeupIn(0, Seconds(1), true); };
     e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
     e->tab_cb = bind(&EditorGUI::CompleteCode, this);
-    e->annotation_cb = [=](const Editor::LineOffset *o){
-      return o->main_tu_line < 0 ? DrawableAnnotation() : editor->main_annotation[o->main_tu_line];
+    e->annotation_cb = [=](const Editor::LineMap::Iterator &i, const String16 &t,
+                           bool first_line, int check_shift, int shift_offset){
+      if (i.val->annotation_ind < 0) i.val->annotation_ind = PushBackIndex(editor->main_annotation, DrawableAnnotation());
+      if (FLAGS_regex_highlight) {
+        DrawableAnnotation annotation;
+        if (check_shift) swap(annotation, editor->main_annotation[i.val->annotation_ind]);
+        cpp_highlighter.GetLineAnnotation
+          (e, i, t, first_line, &e->syntax_parsed_line_index, &e->syntax_parsed_anchor, &editor->main_annotation[0]);
+        if (annotation.Shifted(editor->main_annotation[i.val->annotation_ind], check_shift, shift_offset)) return NullPointer<DrawableAnnotation>();
+      }
+      return i.val->annotation_ind < 0 ? nullptr : &editor->main_annotation[i.val->annotation_ind];
     };
     if (FLAGS_regex_highlight) {
-      CHECK(e->CacheModifiedText(true));
       editor->main_annotation.resize(e->file_line.size());
-      cpp_highlighter.UpdateAnnotation
-        (e->cached_text->buf, &editor->main_annotation[0], editor->main_annotation.size());
+      // cpp_highlighter.UpdateAnnotation(e, &editor->main_annotation[0], editor->main_annotation.size());
     }
     if (source_tabs.box.h) e->CheckResized(Box(source_tabs.box.w, source_tabs.box.h-source_tabs.tab_dim.y));
 
@@ -214,7 +224,7 @@ struct EditorGUI : public GUI {
     MyEditorDialog *d = Top();
     if (d && d->view.modified != Time(0) && d->view.modified + Seconds(1) <= now) {
       d->view.modified = Time(0); 
-      ReparseTranslationUnit(FindOrDie(opened_files, d->view.file->Filename())); 
+      if (FLAGS_clang) ReparseTranslationUnit(FindOrDie(opened_files, d->view.file->Filename())); 
     }
 
     W->gd->DisableBlend();
@@ -285,9 +295,17 @@ struct EditorGUI : public GUI {
     swap(d->main_tu, d->next_tu);
     if (FLAGS_clang_highlight) swap(d->main_annotation, d->next_annotation);
     if (replace) d->main_tu = unique_ptr<TranslationUnit>(tu);
-    for (auto i = d->view.file_line.Begin(); i.ind; ++i) swap(i.val->main_tu_line, i.val->next_tu_line);
-    d->view.RefreshLines();
-    d->view.Redraw();
+    for (auto i = d->view.file_line.Begin(); i.ind; ++i) {
+      if (i.val->next_tu_line >= 0) {
+        i.val->main_tu_line = i.val->next_tu_line;
+        if (FLAGS_clang_highlight) i.val->annotation_ind = i.val->main_tu_line;
+      }
+      i.val->next_tu_line =-1;
+    }
+    if (FLAGS_clang_highlight) {
+      d->view.RefreshLines();
+      d->view.Redraw();
+    }
     d->parsing = false;
   }
 
@@ -302,14 +320,21 @@ struct EditorGUI : public GUI {
     for (int i=0; i<10; i++) INFO("y0y0 ", i, " = ", code_completions.view.completions->GetText(i));
   }
 
+  void GotoMatchingBrace() {
+    MyEditorDialog *d = Top();
+    if (!d || !d->main_tu || !d->view.cursor_offset || d->view.cursor_offset->main_tu_line < 0) return;
+    auto r = d->main_tu->GetCursorExtent(d->view.file->Filename(), d->view.cursor_offset->main_tu_line, d->view.cursor.i.x);
+    if (IsOpenParen(d->view.CursorGlyph())) d->view.ScrollTo(r.second.y-1, r.second.x-1);
+    else                                    d->view.ScrollTo(r.first .y-1, r.first .x-1);
+  }
+
   void GotoDefinition() {
     MyEditorDialog *d = Top();
     if (!d || !d->main_tu || !d->view.cursor_offset || d->view.cursor_offset->main_tu_line < 0) return;
     auto fo = d->main_tu->FindDefinition(d->view.file->Filename(), d->view.cursor_offset->main_tu_line, d->view.cursor.i.x);
     if (fo.fn.empty()) return;
-    INFO("Editor GotoDefinition ", fo.fn, " ", fo.offset, " ", fo.y, " ", fo.x);
     auto editor = Open(fo.fn);
-    editor->view.ScrollTo(fo.y-1, fo.x);
+    editor->view.ScrollTo(fo.y-1, fo.x-1);
   }
 
   void GotoLine(const string &line) {
@@ -397,6 +422,7 @@ void MyWindowStart(Window *W) {
   W->shell->Add("wrap",         [=](const vector<string>&a){ if (auto t = editor_gui->Top()) t->view.SetWrapMode(a.size()?a[0]:""); app->scheduler.Wakeup(0); });
   W->shell->Add("undo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.WalkUndo(true);                app->scheduler.Wakeup(0); });
   W->shell->Add("redo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.WalkUndo(false);               app->scheduler.Wakeup(0); });
+  W->shell->Add("gotobrace",    [=](const vector<string>&a){ editor_gui->GotoMatchingBrace();       app->scheduler.Wakeup(0); });
   W->shell->Add("gotodef",      [=](const vector<string>&a){ editor_gui->GotoDefinition();          app->scheduler.Wakeup(0); });
   W->shell->Add("open",         [=](const vector<string>&a){ editor_gui->Open(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
   W->shell->Add("gotoline",     [=](const vector<string>&a){ editor_gui->GotoLine(a.size()?a[0]:"");app->scheduler.Wakeup(0); });
@@ -418,7 +444,7 @@ void MyWindowStart(Window *W) {
 using namespace LFL;
 
 extern "C" void MyAppCreate() {
-  FLAGS_lfapp_video = FLAGS_lfapp_input = true;
+  FLAGS_enable_video = FLAGS_enable_input = true;
   FLAGS_threadpool_size = 1;
   app = new Application();
   screen = new Window();
@@ -444,7 +470,7 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
   app->scheduler.AddWaitForeverKeyboard();
   app->scheduler.AddWaitForeverMouse();
 
-  bool start_network_thread = !(FLAGS_lfapp_network_.override && !FLAGS_lfapp_network);
+  bool start_network_thread = !(FLAGS_enable_network_.override && !FLAGS_enable_network);
   if (start_network_thread) {
     app->net = make_unique<Network>();
     CHECK(app->CreateNetworkThread(false, true));
