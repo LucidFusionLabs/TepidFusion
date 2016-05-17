@@ -18,8 +18,8 @@
 
 #include "core/app/gui.h"
 #include "core/app/ipc.h"
-#include "core/app/types/syntax.h"
 #include "core/app/bindings/ide.h"
+#include "core/app/bindings/syntax.h"
 #include "core/imports/diff-match-patch-cpp-stl/diff_match_patch.h"
 
 namespace LFL {
@@ -50,7 +50,8 @@ struct MyEditorDialog : public EditorDialog {
   vector<DrawableAnnotation> main_annotation, next_annotation;
   vector<pair<int, int>> find_results;
   bool parsing=0, needs_reparse=0;
-  int reparsed=0, find_results_ind=0;
+  int file_type=0, reparsed=0, find_results_ind=0;
+  SyntaxMatcher *regex_highlighter=0;
   using EditorDialog::EditorDialog;
   virtual ~MyEditorDialog() {}
 };
@@ -67,6 +68,7 @@ struct EditorGUI : public GUI {
   DirectoryTreeDialog dir_tree;
   PropertyTreeDialog targets_tree, options_tree;
   CodeCompletionsViewDialog code_completions;
+  MyEditorDialog *code_completions_editor=0;
   unique_ptr<Terminal> build_terminal;
   vector<MenuItem> source_context_menu{ MenuItem{ "", "Go To Brace", "gotobrace" },
     MenuItem{ "", "Go To Definition", "gotodef" } };
@@ -76,6 +78,7 @@ struct EditorGUI : public GUI {
   CMakeDaemon cmakedaemon;
   CMakeDaemon::TargetInfo default_project;
   RegexCPlusPlusHighlighter cpp_highlighter;
+  RegexCMakeHighlighter cmake_highlighter;
 
   EditorGUI() :
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
@@ -83,8 +86,9 @@ struct EditorGUI : public GUI {
     dir_tree        (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
     targets_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
     options_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    code_completions(screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    cpp_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)) {
+    code_completions(screen->gd, app->fonts->Change(screen->default_font, 0, *my_app->cpp_colors->GetFGColor("StatusLine"), *my_app->cpp_colors->GetBGColor("StatusLine"))),
+    cpp_highlighter  (my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)),
+    cmake_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)) {
     Activate(); 
 
     dir_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
@@ -114,6 +118,8 @@ struct EditorGUI : public GUI {
     if (my_app->project) options_tree.title_text = "Options";
     options_tabs.AddTab(&options_tree);
     screen->gui.push_back(&options_tree);
+
+    code_completions.deleted_cb = [=](){ code_completions_editor = nullptr; };
     screen->gui.push_back(&code_completions);
 
     build_terminal = make_unique<Terminal>(nullptr, screen->gd, screen->default_font);
@@ -131,9 +137,7 @@ struct EditorGUI : public GUI {
             (FLAGS_default_project, bind(&EditorGUI::UpdateDefaultProjectProperties, this, _1)))
           ERROR("default_project ", FLAGS_default_project, " not found");
       }); };
-      cmakedaemon.Start
-        (FLAGS_cmake_daemon[0] == '/' ? FLAGS_cmake_daemon : Asset::FileName(FLAGS_cmake_daemon),
-         my_app->project->build_dir);
+      cmakedaemon.Start(Asset::FileName(FLAGS_cmake_daemon), my_app->project->build_dir);
     }
   }
 
@@ -156,6 +160,12 @@ struct EditorGUI : public GUI {
     Editor *e = &editor->view;
     string fn = e->file->Filename();
     opened_files[fn] = shared_ptr<MyEditorDialog>(editor);
+    if      (FileSuffix::CPP(fn))   editor->file_type = FileType::CPP;
+    else if (FileSuffix::CMake(fn)) editor->file_type = FileType::CMake;
+    if (FLAGS_regex_highlight) switch(editor->file_type) {
+      case FileType::CPP:   editor->regex_highlighter = &cpp_highlighter;   break;
+      case FileType::CMake: editor->regex_highlighter = &cmake_highlighter; break;
+    }
     source_tabs.AddTab(editor);
     child_box.Clear();
 
@@ -167,24 +177,27 @@ struct EditorGUI : public GUI {
     e->modified_cb = [=]{ app->scheduler.WakeupIn(0, Seconds(1), true); };
     e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
     e->tab_cb = bind(&EditorGUI::CompleteCode, this);
-    e->annotation_cb = [=](const Editor::LineMap::Iterator &i, const String16 &t,
-                           bool first_line, int check_shift, int shift_offset){
-      if (i.val->annotation_ind < 0) i.val->annotation_ind = PushBackIndex(editor->main_annotation, DrawableAnnotation());
-      if (FLAGS_regex_highlight) {
-        DrawableAnnotation annotation;
-        if (check_shift) swap(annotation, editor->main_annotation[i.val->annotation_ind]);
-        cpp_highlighter.GetLineAnnotation
-          (e, i, t, first_line, &e->syntax_parsed_line_index, &e->syntax_parsed_anchor, &editor->main_annotation[0]);
-        if (annotation.Shifted(editor->main_annotation[i.val->annotation_ind], check_shift, shift_offset)) return NullPointer<DrawableAnnotation>();
-      }
-      return i.val->annotation_ind < 0 ? nullptr : &editor->main_annotation[i.val->annotation_ind];
-    };
-    if (FLAGS_regex_highlight) {
-      editor->main_annotation.resize(e->file_line.size());
-      // cpp_highlighter.UpdateAnnotation(e, &editor->main_annotation[0], editor->main_annotation.size());
-    }
-    if (source_tabs.box.h) e->CheckResized(Box(source_tabs.box.w, source_tabs.box.h-source_tabs.tab_dim.y));
 
+    if (editor->file_type) {
+      e->annotation_cb = [=](const Editor::LineMap::Iterator &i, const String16 &t,
+                             bool first_line, int check_shift, int shift_offset){
+        if (i.val->annotation_ind < 0) i.val->annotation_ind = PushBackIndex(editor->main_annotation, DrawableAnnotation());
+        if (editor->regex_highlighter) {
+          DrawableAnnotation annotation;
+          if (check_shift) swap(annotation, editor->main_annotation[i.val->annotation_ind]);
+          editor->regex_highlighter->GetLineAnnotation
+            (e, i, t, first_line, &e->syntax_parsed_line_index, &e->syntax_parsed_anchor, &editor->main_annotation[0]);
+          if (annotation.Shifted(editor->main_annotation[i.val->annotation_ind], check_shift, shift_offset)) return NullPointer<DrawableAnnotation>();
+        }
+        return i.val->annotation_ind < 0 ? nullptr : &editor->main_annotation[i.val->annotation_ind];
+      };
+      if (editor->regex_highlighter) {
+        editor->main_annotation.resize(e->file_line.size());
+        // editor->regex_highlighter->UpdateAnnotation(e, &editor->main_annotation[0], editor->main_annotation.size());
+      }
+    }
+
+    if (source_tabs.box.h) e->CheckResized(Box(source_tabs.box.w, source_tabs.box.h-source_tabs.tab_dim.y));
     editor->deleted_cb = [=](){ source_tabs.DelTab(editor); child_box.Clear(); opened_files.erase(fn); };
     return editor;
   }
@@ -238,7 +251,7 @@ struct EditorGUI : public GUI {
     if (right_pane.w) right_pane_tabs->Draw();
     if (right_divider.changing) BoxOutline().Draw(Box::DelBorder(right_pane, Border(1,1,1,1)));
     if (bottom_divider.changing) BoxOutline().Draw(Box::DelBorder(bottom_center_pane, Border(1,1,1,1)));
-    if (code_completions.view.active) code_completions.Draw();
+    if (code_completions_editor == d) code_completions.Draw();
     W->DrawDialogs();
     return 0;
   }
@@ -311,13 +324,24 @@ struct EditorGUI : public GUI {
 
   void CompleteCode() {
     MyEditorDialog *d = Top();
-    if (!d || !d->main_tu || !d->view.cursor_offset) return;
-    code_completions.view.completions =
-      d->main_tu->CompleteCode(MakeOpenedFilesVector(), d->view.cursor_line_index, d->view.cursor.i.x);
+    if (!d) return;
+    if (d == code_completions_editor) return code_completions.deleted_cb();
+    if (d->file_type == FileType::CPP) {
+      if (!d->view.cursor_offset || !d->main_tu) return;
+      code_completions.view.completions = d->main_tu->CompleteCode
+        (MakeOpenedFilesVector(), d->view.cursor_line_index, d->view.cursor.i.x);
+    } else if (d->file_type == FileType::CMake) {
+      if (!d->view.cursor_offset || !cmakedaemon.Ready()) return;
+      d->view.CacheModifiedText(true);
+      code_completions.view.completions = cmakedaemon.CompleteCode
+        (d->view.file->Filename(), d->view.cursor_line_index, d->view.cursor.i.x, d->view.cached_text->buf);
+    } else return;
+    if (!code_completions.view.completions) return;
     code_completions.view.RefreshLines();
     code_completions.view.Redraw();
-    code_completions.view.active = true;
-    for (int i=0; i<10; i++) INFO("y0y0 ", i, " = ", code_completions.view.completions->GetText(i));
+    point dim(d->view.style.font->max_width*20, d->view.style.font->Height()*10);
+    code_completions.box = Box(d->view.cursor.p - point(0, dim.y), dim);
+    code_completions_editor = d;
   }
 
   void GotoMatchingBrace() {
