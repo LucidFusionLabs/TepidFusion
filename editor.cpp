@@ -227,12 +227,7 @@ struct EditorGUI : public GUI {
   }
 
   int Frame(LFL::Window *W, unsigned clicks, int flag) {
-    if (Singleton<FlagMap>::Get()->dirty) {
-      Singleton<FlagMap>::Get()->dirty = false;
-      chdir(app->startdir.c_str());
-      SettingsFile::Write(my_app->save_settings, LFAppDownloadDir(), "settings");
-      INFO("wrote settings");
-    }
+    if (Singleton<FlagMap>::Get()->dirty) SettingsFile::Save(my_app->save_settings);
     Time now = Now();
     MyEditorDialog *d = Top();
     if (d && d->view.modified != Time(0) && d->view.modified + Seconds(1) <= now) {
@@ -256,7 +251,7 @@ struct EditorGUI : public GUI {
     return 0;
   }
 
-  void UpdateAnimating() { app->scheduler.SetAnimating(console_animating); }
+  void UpdateAnimating() { app->scheduler.SetAnimating(screen, console_animating); }
   void OnConsoleAnimating() { console_animating = screen->console->animating; UpdateAnimating(); }
   void ShowProjectExplorer() { right_divider.size = init_right_divider_w; right_divider.changed=1; }
   void ShowBuildTerminal() { bottom_divider.size = screen->default_font->Height()*5; bottom_divider.changed=1; }
@@ -467,10 +462,10 @@ void MyWindowStart(Window *W) {
 }; // namespace LFL
 using namespace LFL;
 
-extern "C" void MyAppCreate() {
+extern "C" void MyAppCreate(int argc, const char* const* argv) {
   FLAGS_enable_video = FLAGS_enable_input = true;
   FLAGS_threadpool_size = 1;
-  app = new Application();
+  app = new Application(argc, argv);
   screen = new Window();
   my_app = new MyAppState();
   app->name = "LEdit";
@@ -480,19 +475,18 @@ extern "C" void MyAppCreate() {
   app->exit_cb = [](){ delete my_app; };
 }
 
-extern "C" int MyAppMain(int argc, const char* const* argv) {
-  if (app->Create(argc, argv, __FILE__)) return -1;
+extern "C" int MyAppMain() {
+  if (app->Create(__FILE__)) return -1;
+  SettingsFile::Load();
   screen->width = FLAGS_width;
   screen->height = FLAGS_height;
 
   if (app->Init()) return -1;
   int optind = Singleton<FlagMap>::Get()->optind;
-  if (optind >= argc) { fprintf(stderr, "Usage: %s [-flags] <file>\n", argv[0]); return -1; }
+  if (optind >= app->argc) { fprintf(stderr, "Usage: %s [-flags] <file>\n", app->argv[0]); return -1; }
 
-  SettingsFile::Read(LFAppDownloadDir(), "settings");
-  Singleton<FlagMap>::Get()->dirty = false;
-  app->scheduler.AddWaitForeverKeyboard();
-  app->scheduler.AddWaitForeverMouse();
+  app->scheduler.AddWaitForeverKeyboard(screen);
+  app->scheduler.AddWaitForeverMouse(screen);
 
   bool start_network_thread = !(FLAGS_enable_network_.override && !FLAGS_enable_network);
   if (start_network_thread) {
@@ -531,6 +525,6 @@ extern "C" int MyAppMain(int argc, const char* const* argv) {
   screen->gd->ClearColor(Color::grey70);
   EditorGUI *editor_gui = screen->GetOwnGUI<EditorGUI>(0);
 
-  editor_gui->Open(argv[optind]);
+  editor_gui->Open(app->argv[optind]);
   return app->Main();
 }
