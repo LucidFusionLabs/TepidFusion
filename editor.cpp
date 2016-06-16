@@ -80,13 +80,13 @@ struct EditorGUI : public GUI {
   RegexCPlusPlusHighlighter cpp_highlighter;
   RegexCMakeHighlighter cmake_highlighter;
 
-  EditorGUI() :
+  EditorGUI(Window *W) : GUI(W),
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
     source_tabs(this), project_tabs(this), options_tabs(this),
-    dir_tree        (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    targets_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    options_tree    (screen->gd, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    code_completions(screen->gd, app->fonts->Change(screen->default_font, 0, *my_app->cpp_colors->GetFGColor("StatusLine"), *my_app->cpp_colors->GetBGColor("StatusLine"))),
+    dir_tree        (screen, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
+    targets_tree    (screen, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
+    options_tree    (screen, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
+    code_completions(screen, app->fonts->Change(screen->default_font, 0, *my_app->cpp_colors->GetFGColor("StatusLine"), *my_app->cpp_colors->GetBGColor("StatusLine"))),
     cpp_highlighter  (my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)),
     cmake_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)) {
     Activate(); 
@@ -122,7 +122,7 @@ struct EditorGUI : public GUI {
     code_completions.deleted_cb = [=](){ code_completions_editor = nullptr; };
     screen->gui.push_back(&code_completions);
 
-    build_terminal = make_unique<Terminal>(nullptr, screen->gd, screen->default_font);
+    build_terminal = make_unique<Terminal>(nullptr, screen, screen->default_font);
     build_terminal->newline_mode = true;
 
     if (my_app->project && !FLAGS_cmake_daemon.empty()) {
@@ -156,7 +156,7 @@ struct EditorGUI : public GUI {
   }
 
   MyEditorDialog *OpenFile(File *input_file) {
-    MyEditorDialog *editor = new MyEditorDialog(screen->gd, screen->default_font, input_file, 1, 1); 
+    MyEditorDialog *editor = new MyEditorDialog(screen, screen->default_font, input_file, 1, 1); 
     Editor *e = &editor->view;
     string fn = e->file->Filename();
     opened_files[fn] = shared_ptr<MyEditorDialog>(editor);
@@ -170,7 +170,7 @@ struct EditorGUI : public GUI {
     child_box.Clear();
 
     e->UpdateMapping(0, FLAGS_regex_highlight);
-    if (FLAGS_clang) ParseTranslationUnit(FindOrDie(opened_files, e->file->Filename())); 
+    if (my_app->project && FLAGS_clang) ParseTranslationUnit(FindOrDie(opened_files, e->file->Filename())); 
     e->line.SetAttrSource(&e->style);
     e->SetColors(my_app->cpp_colors);
     e->InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
@@ -211,7 +211,7 @@ struct EditorGUI : public GUI {
   }
 
   void Layout() {
-    Reset();
+    ResetGL();
     box = screen->Box();
     right_divider.LayoutDivideRight(box, &top_center_pane, &right_pane, -box.h);
     bottom_divider.LayoutDivideBottom(top_center_pane, &top_center_pane, &bottom_center_pane, -box.h);
@@ -230,22 +230,23 @@ struct EditorGUI : public GUI {
     if (Singleton<FlagMap>::Get()->dirty) SettingsFile::Save(my_app->save_settings);
     Time now = Now();
     MyEditorDialog *d = Top();
+    GraphicsContext gc(W->gd);
     if (d && d->view.modified != Time(0) && d->view.modified + Seconds(1) <= now) {
       d->view.modified = Time(0); 
       if (FLAGS_clang) ReparseTranslationUnit(FindOrDie(opened_files, d->view.file->Filename())); 
     }
 
-    W->gd->DisableBlend();
+    gc.gd->DisableBlend();
     if (bottom_divider.changed || right_divider.changed) Layout();
     if (child_box.data.empty()) Layout();
     source_tabs.Draw();
     GUI::Draw();
-    screen->gd->DrawMode(DrawMode::_2D);
+    gc.gd->DrawMode(DrawMode::_2D);
     if (bottom_center_pane.h) build_terminal->Draw(bottom_center_pane, TextArea::DrawFlag::CheckResized);
-    screen->gd->DrawMode(DrawMode::_2D);
+    gc.gd->DrawMode(DrawMode::_2D);
     if (right_pane.w) right_pane_tabs->Draw();
-    if (right_divider.changing) BoxOutline().Draw(Box::DelBorder(right_pane, Border(1,1,1,1)));
-    if (bottom_divider.changing) BoxOutline().Draw(Box::DelBorder(bottom_center_pane, Border(1,1,1,1)));
+    if (right_divider.changing) BoxOutline().Draw(&gc, Box::DelBorder(right_pane, Border(1,1,1,1)));
+    if (bottom_divider.changing) BoxOutline().Draw(&gc, Box::DelBorder(bottom_center_pane, Border(1,1,1,1)));
     if (code_completions_editor == d) code_completions.Draw();
     W->DrawDialogs();
     return 0;
@@ -430,7 +431,7 @@ void MyWindowInit(Window *W) {
 }
 
 void MyWindowStart(Window *W) {
-  EditorGUI *editor_gui = W->ReplaceGUI(0, make_unique<EditorGUI>());
+  EditorGUI *editor_gui = W->ReplaceGUI(0, make_unique<EditorGUI>(W));
   if (FLAGS_console) W->InitConsole(bind(&EditorGUI::OnConsoleAnimating, editor_gui));
   W->frame_cb = bind(&EditorGUI::Frame, editor_gui, _1, _2, _3);
   W->default_textbox = [=](){ auto t = editor_gui->Top(); return t ? &t->view : nullptr; };
