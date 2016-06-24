@@ -436,7 +436,7 @@ void MyWindowStart(Window *W) {
   W->frame_cb = bind(&EditorGUI::Frame, editor_gui, _1, _2, _3);
   W->default_textbox = [=](){ auto t = editor_gui->Top(); return t ? &t->view : nullptr; };
 
-  W->shell = make_unique<Shell>(nullptr, nullptr, nullptr);
+  W->shell = make_unique<Shell>();
   W->shell->Add("choose",       [=](const vector<string>&) { app->LaunchNativeFileChooser(1,0,0,"open"); });
   W->shell->Add("save",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.Save();                        app->scheduler.Wakeup(0); });
   W->shell->Add("wrap",         [=](const vector<string>&a){ if (auto t = editor_gui->Top()) t->view.SetWrapMode(a.size()?a[0]:""); app->scheduler.Wakeup(0); });
