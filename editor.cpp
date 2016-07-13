@@ -42,6 +42,9 @@ struct MyAppState {
   SearchPaths search_paths;
   string build_bin;
   Editor::SyntaxColors *cpp_colors = Singleton<Editor::Base16DefaultDarkSyntaxColors>::Get();
+  unique_ptr<SystemMenuWidget> file_menu, edit_menu, view_menu;
+  unique_ptr<SystemPanelWidget> find_panel, gotoline_panel;
+
   MyAppState() : search_paths(getenv("PATH")), build_bin(search_paths.Find("make")) {}
 } *my_app;
 
@@ -94,7 +97,7 @@ struct EditorGUI : public GUI {
     dir_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (my_app->project) dir_tree.title_text = "Source";
     if (my_app->project) dir_tree.view.Open(StrCat(my_app->project->source_dir, LocalFile::Slash));
-    dir_tree.view.InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(dir_context_menu); }));
+    dir_tree.view.InitContextMenu(bind([=](){ app->ShowSystemContextMenu(dir_context_menu); }));
     dir_tree.view.selected_line_clicked_cb = [&](PropertyView *v, PropertyTree::Id id) {
       if (auto n = v->GetNode(id)) if (n->val.size() && n->val.back() != '/') Open(n->val);
     };
@@ -173,7 +176,7 @@ struct EditorGUI : public GUI {
     if (my_app->project && FLAGS_clang) ParseTranslationUnit(FindOrDie(opened_files, e->file->Filename())); 
     e->line.SetAttrSource(&e->style);
     e->SetColors(my_app->cpp_colors);
-    e->InitContextMenu(bind([=](){ app->LaunchNativeContextMenu(source_context_menu); }));
+    e->InitContextMenu(bind([=](){ app->ShowSystemContextMenu(source_context_menu); }));
     e->modified_cb = [=]{ app->scheduler.WakeupIn(0, Seconds(1), true); };
     e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
     e->tab_cb = bind(&EditorGUI::CompleteCode, this);
@@ -358,18 +361,18 @@ struct EditorGUI : public GUI {
   }
 
   void GotoLine(const string &line) {
-    if (line.empty()) app->LaunchNativePanel("gotoline");
+    if (line.empty()) my_app->gotoline_panel->Show();
     else if (MyEditorDialog *d = Top()) d->view.ScrollTo(atoi(line)-1, 0);
   }
 
   void Find(const string &line) {
     MyEditorDialog *d = Top();
-    if (line.empty() || !d) return app->LaunchNativePanel("find");
+    if (line.empty() || !d) return my_app->find_panel->Show();
     CHECK(d->view.CacheModifiedText(true));
     d->find_results.clear();
     Regex regex(line);
     RegexLineMatcher(&regex, d->view.cached_text->buf).MatchAll(&d->find_results);
-    if (!d->find_results.size()) return app->SetNativePanelTitle("find", "Find");
+    if (!d->find_results.size()) return my_app->find_panel->SetTitle("Find");
     d->find_results_ind = -1;
     FindPrevOrNext(false);
   }
@@ -380,7 +383,7 @@ struct EditorGUI : public GUI {
     d->find_results_ind = RingIndex::Wrap(d->find_results_ind + (prev ? -1 : 1), d->find_results.size());
     const auto &r = d->find_results[d->find_results_ind];
     d->view.ScrollTo(r.first, r.second);
-    app->SetNativePanelTitle("find", StrCat("Find [", d->find_results_ind+1, " of ", d->find_results.size(), "]"));
+    my_app->find_panel->SetTitle(StrCat("Find [", d->find_results_ind+1, " of ", d->find_results.size(), "]"));
   }
 
   void Build() {
@@ -437,7 +440,7 @@ void MyWindowStart(Window *W) {
   W->default_textbox = [=](){ auto t = editor_gui->Top(); return t ? &t->view : nullptr; };
 
   W->shell = make_unique<Shell>();
-  W->shell->Add("choose",       [=](const vector<string>&) { app->LaunchNativeFileChooser(1,0,0,"open"); });
+  W->shell->Add("choose",       [=](const vector<string>&) { app->ShowSystemFileChooser(1,0,0,"open"); });
   W->shell->Add("save",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.Save();                        app->scheduler.Wakeup(0); });
   W->shell->Add("wrap",         [=](const vector<string>&a){ if (auto t = editor_gui->Top()) t->view.SetWrapMode(a.size()?a[0]:""); app->scheduler.Wakeup(0); });
   W->shell->Add("undo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.WalkUndo(true);                app->scheduler.Wakeup(0); });
@@ -486,8 +489,8 @@ extern "C" int MyAppMain() {
   int optind = Singleton<FlagMap>::Get()->optind;
   if (optind >= app->argc) { fprintf(stderr, "Usage: %s [-flags] <file>\n", app->argv[0]); return -1; }
 
-  app->scheduler.AddWaitForeverKeyboard(screen);
-  app->scheduler.AddWaitForeverMouse(screen);
+  app->scheduler.AddFrameWaitKeyboard(screen);
+  app->scheduler.AddFrameWaitMouse(screen);
 
   bool start_network_thread = !(FLAGS_enable_network_.override && !FLAGS_enable_network);
   if (start_network_thread) {
@@ -495,24 +498,24 @@ extern "C" int MyAppMain() {
     CHECK(app->CreateNetworkThread(false, true));
   }
 
-  app->AddNativeMenu("File", { MenuItem{"o", "Open", "choose"}, MenuItem{"s", "Save", "save" },
+  my_app->file_menu = make_unique<SystemMenuWidget>("File", vector<MenuItem>{ MenuItem{"o", "Open", "choose"}, MenuItem{"s", "Save", "save" },
     MenuItem{"b", "Build", "build"}, MenuItem{"", "Tidy", "tidy"} });
 
-  app->AddNativeEditMenu({ MenuItem{"z", "Undo", "undo"}, MenuItem{"y", "Redo", "redo"},
+  my_app->edit_menu = SystemMenuWidget::CreateEditMenu({ MenuItem{"z", "Undo", "undo"}, MenuItem{"y", "Redo", "redo"},
     MenuItem{"f", "Find", "find"}, MenuItem{"g", "Goto", "gotoline"}, MenuItem{"", "Diff unsaved", "diff_unsaved"},
     MenuItem{"", StrCat(FLAGS_cvs_cmd, " diff"), "diff_cvs"} });
 
-  app->AddNativeMenu("View", { MenuItem{"=", "Zoom In", ""}, MenuItem{"-", "Zoom Out", ""},
+  my_app->view_menu = make_unique<SystemMenuWidget>("View", vector<MenuItem>{ MenuItem{"=", "Zoom In", ""}, MenuItem{"-", "Zoom Out", ""},
     MenuItem{"", "No wrap", "wrap none"}, MenuItem{"", "Line wrap", "wrap lines"}, MenuItem{"", "Word wrap", "wrap words"}, 
     MenuItem{"", "Show Project Explorer", "show_project"}, MenuItem{"", "Show Build Console", "show_build"} });
 
-  app->AddNativePanel("find", Box(0, 0, 300, 60), "Find", {
+  my_app->find_panel = make_unique<SystemPanelWidget>(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
     PanelItem{ "textbox", Box(20, 20, 160, 20), "find" }, 
     PanelItem{ "button:<", Box(200, 20, 40, 20), "findprev" },
     PanelItem{ "button:>", Box(240, 20, 40, 20), "findnext" }
   });
 
-  app->AddNativePanel("gotoline", Box(0, 0, 200, 60), "Goto line number", {
+  my_app->gotoline_panel = make_unique<SystemPanelWidget>(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
     PanelItem{ "textbox", Box(20, 20, 160, 20), "gotoline" } });
 
   if (FLAGS_project.size()) {
