@@ -42,9 +42,6 @@ struct MyAppState {
   SearchPaths search_paths;
   string build_bin;
   Editor::SyntaxColors *cpp_colors = Singleton<Editor::Base16DefaultDarkSyntaxColors>::Get();
-  unique_ptr<SystemMenuWidget> file_menu, edit_menu, view_menu;
-  unique_ptr<SystemPanelWidget> find_panel, gotoline_panel;
-
   MyAppState() : search_paths(getenv("PATH")), build_bin(search_paths.Find("make")) {}
 } *my_app;
 
@@ -73,9 +70,13 @@ struct EditorGUI : public GUI {
   CodeCompletionsViewDialog code_completions;
   MyEditorDialog *code_completions_editor=0;
   unique_ptr<Terminal> build_terminal;
-  vector<MenuItem> source_context_menu{ MenuItem{ "", "Go To Brace", "gotobrace" },
-    MenuItem{ "", "Go To Definition", "gotodef" } };
-  vector<MenuItem> dir_context_menu{ MenuItem{ "b", "Build", "build" } };
+  unique_ptr<SystemMenuView> file_menu, edit_menu, view_menu;
+  unique_ptr<SystemPanelView> find_panel, gotoline_panel;
+  vector<MenuItem> source_context_menu{
+    MenuItem{ "", "Go To Brace",      [=]{ GotoMatchingBrace(); app->scheduler.Wakeup(0); }},
+    MenuItem{ "", "Go To Definition", [=]{ GotoDefinition();    app->scheduler.Wakeup(0); }} };
+  vector<MenuItem> dir_context_menu{
+    MenuItem{ "b", "Build",           [=]{ Build();             app->scheduler.Wakeup(0); }} };
   bool console_animating = 0;
   ProcessPipe build_process;
   CMakeDaemon cmakedaemon;
@@ -92,8 +93,44 @@ struct EditorGUI : public GUI {
     code_completions(screen, app->fonts->Change(screen->default_font, 0, *my_app->cpp_colors->GetFGColor("StatusLine"), *my_app->cpp_colors->GetBGColor("StatusLine"))),
     cpp_highlighter  (my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)),
     cmake_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)) {
-    Activate(); 
+ 
+    file_menu = make_unique<SystemMenuView>("File", vector<MenuItem>{
+      MenuItem{"o", "Open",  [=]{ app->ShowSystemFileChooser(1,0,0,[=](const StringVec &a){ Open(a.size()?a[0]:""); app->scheduler.Wakeup(0); }); }},
+      MenuItem{"s", "Save",  [=]{ if (auto t = Top()) t->view.Save(); app->scheduler.Wakeup(0); }},
+      MenuItem{"b", "Build", [=]{ Build();                            app->scheduler.Wakeup(0); }},
+      MenuItem{"",  "Tidy",  [=]{ Tidy();                             app->scheduler.Wakeup(0); }}
+    });
 
+    edit_menu = SystemMenuView::CreateEditMenu({
+      MenuItem{"z", "Undo",  [=]{ if (auto t = Top()) t->view.WalkUndo(true);  app->scheduler.Wakeup(0); }},
+      MenuItem{"y", "Redo",  [=]{ if (auto t = Top()) t->view.WalkUndo(false); app->scheduler.Wakeup(0); }},
+      MenuItem{"f", "Find",  [=]{ Find("");                                    app->scheduler.Wakeup(0); }},
+      MenuItem{"g", "Goto",  [=]{ GotoLine("");                                app->scheduler.Wakeup(0); }},
+      MenuItem{"", "Diff unsaved", [=]() { DiffUnsavedChanges();               app->scheduler.Wakeup(0); }},
+      MenuItem{"", StrCat(FLAGS_cvs_cmd, " diff"), [=]{ DiffCVS();             app->scheduler.Wakeup(0); }}
+    });
+ 
+    view_menu = make_unique<SystemMenuView>("View", vector<MenuItem>{
+      MenuItem{"=", "Zoom In", },
+      MenuItem{"-", "Zoom Out", },
+      MenuItem{"",  "No wrap",    [=]{ if (auto t = Top()) t->view.SetWrapMode("none");  app->scheduler.Wakeup(0); }},
+      MenuItem{"",  "Line wrap",  [=]{ if (auto t = Top()) t->view.SetWrapMode("lines"); app->scheduler.Wakeup(0); }},
+      MenuItem{"",  "Word wrap",  [=]{ if (auto t = Top()) t->view.SetWrapMode("words"); app->scheduler.Wakeup(0); }},
+      MenuItem{"",  "Show Project Explorer", [=]{ ShowProjectExplorer();                 app->scheduler.Wakeup(0); }},
+      MenuItem{"",  "Show Build Console",    [=]{ ShowBuildTerminal();                   app->scheduler.Wakeup(0); }},
+    });
+ 
+    find_panel = make_unique<SystemPanelView>(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
+      PanelItem{ "textbox",  Box(20, 20, 160, 20), [=](const string &a){ Find(a);               app->scheduler.Wakeup(0); }},
+      PanelItem{ "button:<", Box(200, 20, 40, 20), [=](const string &a){ FindPrevOrNext(true);  app->scheduler.Wakeup(0); }},
+      PanelItem{ "button:>", Box(240, 20, 40, 20), [=](const string &a){ FindPrevOrNext(false); app->scheduler.Wakeup(0); }}
+    });
+ 
+    gotoline_panel = make_unique<SystemPanelView>(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
+      PanelItem{ "textbox", Box(20, 20, 160, 20), [=](const string &a){ GotoLine(a); app->scheduler.Wakeup(0); }}
+    });
+
+    Activate(); 
     dir_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (my_app->project) dir_tree.title_text = "Source";
     if (my_app->project) dir_tree.view.Open(StrCat(my_app->project->source_dir, LocalFile::Slash));
@@ -361,18 +398,18 @@ struct EditorGUI : public GUI {
   }
 
   void GotoLine(const string &line) {
-    if (line.empty()) my_app->gotoline_panel->Show();
+    if (line.empty()) gotoline_panel->Show();
     else if (MyEditorDialog *d = Top()) d->view.ScrollTo(atoi(line)-1, 0);
   }
 
   void Find(const string &line) {
     MyEditorDialog *d = Top();
-    if (line.empty() || !d) return my_app->find_panel->Show();
+    if (line.empty() || !d) return find_panel->Show();
     CHECK(d->view.CacheModifiedText(true));
     d->find_results.clear();
     Regex regex(line);
     RegexLineMatcher(&regex, d->view.cached_text->buf).MatchAll(&d->find_results);
-    if (!d->find_results.size()) return my_app->find_panel->SetTitle("Find");
+    if (!d->find_results.size()) return find_panel->SetTitle("Find");
     d->find_results_ind = -1;
     FindPrevOrNext(false);
   }
@@ -383,7 +420,7 @@ struct EditorGUI : public GUI {
     d->find_results_ind = RingIndex::Wrap(d->find_results_ind + (prev ? -1 : 1), d->find_results.size());
     const auto &r = d->find_results[d->find_results_ind];
     d->view.ScrollTo(r.first, r.second);
-    my_app->find_panel->SetTitle(StrCat("Find [", d->find_results_ind+1, " of ", d->find_results.size(), "]"));
+    find_panel->SetTitle(StrCat("Find [", d->find_results_ind+1, " of ", d->find_results.size(), "]"));
   }
 
   void Build() {
@@ -438,27 +475,7 @@ void MyWindowStart(Window *W) {
   if (FLAGS_console) W->InitConsole(bind(&EditorGUI::OnConsoleAnimating, editor_gui));
   W->frame_cb = bind(&EditorGUI::Frame, editor_gui, _1, _2, _3);
   W->default_textbox = [=](){ auto t = editor_gui->Top(); return t ? &t->view : nullptr; };
-
   W->shell = make_unique<Shell>();
-  W->shell->Add("choose",       [=](const vector<string>&) { app->ShowSystemFileChooser(1,0,0,"open"); });
-  W->shell->Add("save",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.Save();                        app->scheduler.Wakeup(0); });
-  W->shell->Add("wrap",         [=](const vector<string>&a){ if (auto t = editor_gui->Top()) t->view.SetWrapMode(a.size()?a[0]:""); app->scheduler.Wakeup(0); });
-  W->shell->Add("undo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.WalkUndo(true);                app->scheduler.Wakeup(0); });
-  W->shell->Add("redo",         [=](const vector<string>&) { if (auto t = editor_gui->Top()) t->view.WalkUndo(false);               app->scheduler.Wakeup(0); });
-  W->shell->Add("gotobrace",    [=](const vector<string>&a){ editor_gui->GotoMatchingBrace();       app->scheduler.Wakeup(0); });
-  W->shell->Add("gotodef",      [=](const vector<string>&a){ editor_gui->GotoDefinition();          app->scheduler.Wakeup(0); });
-  W->shell->Add("open",         [=](const vector<string>&a){ editor_gui->Open(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
-  W->shell->Add("gotoline",     [=](const vector<string>&a){ editor_gui->GotoLine(a.size()?a[0]:"");app->scheduler.Wakeup(0); });
-  W->shell->Add("find",         [=](const vector<string>&a){ editor_gui->Find(a.size() ? a[0]: ""); app->scheduler.Wakeup(0); });
-  W->shell->Add("findprev",     [=](const vector<string>&) { editor_gui->FindPrevOrNext(true);      app->scheduler.Wakeup(0); });
-  W->shell->Add("findnext",     [=](const vector<string>&) { editor_gui->FindPrevOrNext(false);     app->scheduler.Wakeup(0); });
-  W->shell->Add("build",        [=](const vector<string>&) { editor_gui->Build();                   app->scheduler.Wakeup(0); });
-  W->shell->Add("tidy",         [=](const vector<string>&) { editor_gui->Tidy();                    app->scheduler.Wakeup(0); });
-  W->shell->Add("show_project", [=](const vector<string>&) { editor_gui->ShowProjectExplorer();     app->scheduler.Wakeup(0); });
-  W->shell->Add("show_build",   [=](const vector<string>&) { editor_gui->ShowBuildTerminal();       app->scheduler.Wakeup(0); });
-  W->shell->Add("diff_unsaved", [=](const vector<string>&) { editor_gui->DiffUnsavedChanges();      app->scheduler.Wakeup(0); });
-  W->shell->Add("diff_cvs",     [=](const vector<string>&) { editor_gui->DiffCVS();                 app->scheduler.Wakeup(0); });
-
   BindMap *binds = W->AddInputController(make_unique<BindMap>());
   binds->Add('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, W->shell.get(), vector<string>())));
 }
@@ -497,27 +514,7 @@ extern "C" int MyAppMain() {
     app->net = make_unique<Network>();
     CHECK(app->CreateNetworkThread(false, true));
   }
-
-  my_app->file_menu = make_unique<SystemMenuWidget>("File", vector<MenuItem>{ MenuItem{"o", "Open", "choose"}, MenuItem{"s", "Save", "save" },
-    MenuItem{"b", "Build", "build"}, MenuItem{"", "Tidy", "tidy"} });
-
-  my_app->edit_menu = SystemMenuWidget::CreateEditMenu({ MenuItem{"z", "Undo", "undo"}, MenuItem{"y", "Redo", "redo"},
-    MenuItem{"f", "Find", "find"}, MenuItem{"g", "Goto", "gotoline"}, MenuItem{"", "Diff unsaved", "diff_unsaved"},
-    MenuItem{"", StrCat(FLAGS_cvs_cmd, " diff"), "diff_cvs"} });
-
-  my_app->view_menu = make_unique<SystemMenuWidget>("View", vector<MenuItem>{ MenuItem{"=", "Zoom In", ""}, MenuItem{"-", "Zoom Out", ""},
-    MenuItem{"", "No wrap", "wrap none"}, MenuItem{"", "Line wrap", "wrap lines"}, MenuItem{"", "Word wrap", "wrap words"}, 
-    MenuItem{"", "Show Project Explorer", "show_project"}, MenuItem{"", "Show Build Console", "show_build"} });
-
-  my_app->find_panel = make_unique<SystemPanelWidget>(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
-    PanelItem{ "textbox", Box(20, 20, 160, 20), "find" }, 
-    PanelItem{ "button:<", Box(200, 20, 40, 20), "findprev" },
-    PanelItem{ "button:>", Box(240, 20, 40, 20), "findnext" }
-  });
-
-  my_app->gotoline_panel = make_unique<SystemPanelWidget>(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
-    PanelItem{ "textbox", Box(20, 20, 160, 20), "gotoline" } });
-
+  
   if (FLAGS_project.size()) {
     my_app->project = make_unique<IDEProject>(FLAGS_project);
     INFO("Project dir = ", my_app->project->build_dir);
