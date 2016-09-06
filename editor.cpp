@@ -87,10 +87,10 @@ struct EditorGUI : public GUI {
   EditorGUI(Window *W) : GUI(W),
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
     source_tabs(this), project_tabs(this), options_tabs(this),
-    dir_tree        (screen, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    targets_tree    (screen, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    options_tree    (screen, app->fonts->Change(screen->default_font, 0, Color::black, Color::grey90)),
-    code_completions(screen, app->fonts->Change(screen->default_font, 0, *my_app->cpp_colors->GetFGColor("StatusLine"), *my_app->cpp_colors->GetBGColor("StatusLine"))),
+    dir_tree        (root, app->fonts->Change(root->default_font, 0, Color::black, Color::grey90)),
+    targets_tree    (root, app->fonts->Change(root->default_font, 0, Color::black, Color::grey90)),
+    options_tree    (root, app->fonts->Change(root->default_font, 0, Color::black, Color::grey90)),
+    code_completions(root, app->fonts->Change(root->default_font, 0, *my_app->cpp_colors->GetFGColor("StatusLine"), *my_app->cpp_colors->GetBGColor("StatusLine"))),
     cpp_highlighter  (my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)),
     cmake_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)) {
  
@@ -139,12 +139,12 @@ struct EditorGUI : public GUI {
       if (auto n = v->GetNode(id)) if (n->val.size() && n->val.back() != '/') Open(n->val);
     };
     project_tabs.AddTab(&dir_tree);
-    screen->gui.push_back(&dir_tree);
+    root->gui.push_back(&dir_tree);
 
     targets_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (my_app->project) targets_tree.title_text = "Targets";
     project_tabs.AddTab(&targets_tree);
-    screen->gui.push_back(&targets_tree);
+    root->gui.push_back(&targets_tree);
     project_tabs.SelectTab(&dir_tree);
 
     options_tree.view.SetRoot(options_tree.view.AddNode(nullptr, "", PropertyTree::Children{
@@ -157,12 +157,12 @@ struct EditorGUI : public GUI {
     options_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (my_app->project) options_tree.title_text = "Options";
     options_tabs.AddTab(&options_tree);
-    screen->gui.push_back(&options_tree);
+    root->gui.push_back(&options_tree);
 
     code_completions.deleted_cb = [=](){ code_completions_editor = nullptr; };
-    screen->gui.push_back(&code_completions);
+    root->gui.push_back(&code_completions);
 
-    build_terminal = make_unique<Terminal>(nullptr, screen, screen->default_font);
+    build_terminal = make_unique<Terminal>(nullptr, root, root->default_font);
     build_terminal->newline_mode = true;
 
     if (my_app->project && !FLAGS_cmake_daemon.empty()) {
@@ -196,7 +196,7 @@ struct EditorGUI : public GUI {
   }
 
   MyEditorDialog *OpenFile(File *input_file) {
-    MyEditorDialog *editor = new MyEditorDialog(screen, screen->default_font, input_file, 1, 1); 
+    MyEditorDialog *editor = new MyEditorDialog(root, root->default_font, input_file, 1, 1); 
     Editor *e = &editor->view;
     string fn = e->file->Filename();
     opened_files[fn] = shared_ptr<MyEditorDialog>(editor);
@@ -252,16 +252,16 @@ struct EditorGUI : public GUI {
 
   void Layout() {
     ResetGL();
-    box = screen->Box();
+    box = root->Box();
     right_divider.LayoutDivideRight(box, &top_center_pane, &right_pane, -box.h);
     bottom_divider.LayoutDivideBottom(top_center_pane, &top_center_pane, &bottom_center_pane, -box.h);
     source_tabs.box = top_center_pane;
-    source_tabs.tab_dim.y = screen->default_font->Height();
+    source_tabs.tab_dim.y = root->default_font->Height();
     source_tabs.Layout();
     if (1) right_pane_tabs = &project_tabs;
     else   right_pane_tabs = &options_tabs;
     right_pane_tabs->box = right_pane;
-    right_pane_tabs->tab_dim.y = screen->default_font->Height();
+    right_pane_tabs->tab_dim.y = root->default_font->Height();
     right_pane_tabs->Layout();
     if (!child_box.Size()) child_box.PushNop();
   }
@@ -292,10 +292,10 @@ struct EditorGUI : public GUI {
     return 0;
   }
 
-  void UpdateAnimating() { app->scheduler.SetAnimating(screen, console_animating); }
-  void OnConsoleAnimating() { console_animating = screen->console->animating; UpdateAnimating(); }
+  void UpdateAnimating() { app->scheduler.SetAnimating(root, console_animating); }
+  void OnConsoleAnimating() { console_animating = root->console->animating; UpdateAnimating(); }
   void ShowProjectExplorer() { right_divider.size = init_right_divider_w; right_divider.changed=1; }
-  void ShowBuildTerminal() { bottom_divider.size = screen->default_font->Height()*5; bottom_divider.changed=1; }
+  void ShowBuildTerminal() { bottom_divider.size = root->default_font->Height()*5; bottom_divider.changed=1; }
   void UpdateDefaultProjectProperties(const CMakeDaemon::TargetInfo &v) { default_project = v; }
 
   void IndentNewline(MyEditorDialog *e) {
@@ -424,7 +424,7 @@ struct EditorGUI : public GUI {
   }
 
   void Build() {
-    if (bottom_divider.size < screen->default_font->Height()) ShowBuildTerminal();
+    if (bottom_divider.size < root->default_font->Height()) ShowBuildTerminal();
     if (build_process.in) return;
     vector<const char*> argv{ my_app->build_bin.c_str(), nullptr };
     string build_dir = StrCat(my_app->project->build_dir, LocalFile::Slash, "term");
@@ -437,7 +437,7 @@ struct EditorGUI : public GUI {
 
   void Tidy() {
     MyEditorDialog *d = Top();
-    if (bottom_divider.size < screen->default_font->Height()) ShowBuildTerminal();
+    if (bottom_divider.size < root->default_font->Height()) ShowBuildTerminal();
     if (build_process.in || !d) return;
     string tidy_bin = StrCat(FLAGS_llvm_dir, "/bin/clang-tidy"), src_file = d->view.file->Filename(),
            build_dir = my_app->project->build_dir;
@@ -475,7 +475,7 @@ void MyWindowStart(Window *W) {
   if (FLAGS_console) W->InitConsole(bind(&EditorGUI::OnConsoleAnimating, editor_gui));
   W->frame_cb = bind(&EditorGUI::Frame, editor_gui, _1, _2, _3);
   W->default_textbox = [=](){ auto t = editor_gui->Top(); return t ? &t->view : nullptr; };
-  W->shell = make_unique<Shell>();
+  W->shell = make_unique<Shell>(W);
   BindMap *binds = W->AddInputController(make_unique<BindMap>());
   binds->Add('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, W->shell.get(), vector<string>())));
 }
@@ -487,27 +487,27 @@ extern "C" void MyAppCreate(int argc, const char* const* argv) {
   FLAGS_enable_video = FLAGS_enable_input = true;
   FLAGS_threadpool_size = 1;
   app = new Application(argc, argv);
-  screen = new Window();
+  app->focused = new Window();
   my_app = new MyAppState();
   app->name = "LEdit";
   app->window_start_cb = MyWindowStart;
   app->window_init_cb = MyWindowInit;
-  app->window_init_cb(screen);
+  app->window_init_cb(app->focused);
   app->exit_cb = [](){ delete my_app; };
 }
 
 extern "C" int MyAppMain() {
   if (app->Create(__FILE__)) return -1;
   SettingsFile::Load();
-  screen->width = FLAGS_width;
-  screen->height = FLAGS_height;
+  app->focused->width = FLAGS_width;
+  app->focused->height = FLAGS_height;
 
   if (app->Init()) return -1;
   int optind = Singleton<FlagMap>::Get()->optind;
   if (optind >= app->argc) { fprintf(stderr, "Usage: %s [-flags] <file>\n", app->argv[0]); return -1; }
 
-  app->scheduler.AddFrameWaitKeyboard(screen);
-  app->scheduler.AddFrameWaitMouse(screen);
+  app->scheduler.AddMainWaitKeyboard(app->focused);
+  app->scheduler.AddMainWaitMouse(app->focused);
 
   bool start_network_thread = !(FLAGS_enable_network_.override && !FLAGS_enable_network);
   if (start_network_thread) {
@@ -522,9 +522,9 @@ extern "C" int MyAppMain() {
     INFO("Default project = ", FLAGS_default_project);
   }
 
-  app->StartNewWindow(screen);
-  screen->gd->ClearColor(Color::grey70);
-  EditorGUI *editor_gui = screen->GetOwnGUI<EditorGUI>(0);
+  app->StartNewWindow(app->focused);
+  app->focused->gd->ClearColor(Color::grey70);
+  EditorGUI *editor_gui = app->focused->GetOwnGUI<EditorGUI>(0);
 
   editor_gui->Open(app->argv[optind]);
   return app->Main();
