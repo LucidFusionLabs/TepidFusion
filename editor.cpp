@@ -511,7 +511,7 @@ extern "C" int MyAppMain() {
 
   bool start_network_thread = !(FLAGS_enable_network_.override && !FLAGS_enable_network);
   if (start_network_thread) {
-    app->net = make_unique<Network>();
+    app->net = make_unique<SocketServices>();
     CHECK(app->CreateNetworkThread(false, true));
   }
   
