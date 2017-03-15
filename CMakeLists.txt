@@ -1,5 +1,9 @@
 # $Id: CMakeLists.txt 1320 2014-10-26 08:12:52Z justin $
 
+if(LFL_MOBILE)
+  return()
+endif()
+
 lfl_set_os_toolkit(EDITOR)
 lfl_project(editor)
 lfl_add_package(editor SOURCES editor.cpp

@@ -83,6 +83,7 @@ struct EditorGUI : public GUI {
   CMakeDaemon::TargetInfo default_project;
   RegexCPlusPlusHighlighter cpp_highlighter;
   RegexCMakeHighlighter cmake_highlighter;
+  unique_ptr<FrameWakeupTimer> wakeup_timer;
 
   EditorGUI(Window *W) : GUI(W),
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
@@ -92,9 +93,10 @@ struct EditorGUI : public GUI {
     options_tree    (root, app->fonts->Change(root->default_font, 0, Color::black, Color::grey90)),
     code_completions(root, app->fonts->Change(root->default_font, 0, *my_app->cpp_colors->GetFGColor("StatusLine"), *my_app->cpp_colors->GetBGColor("StatusLine"))),
     cpp_highlighter  (my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)),
-    cmake_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)) {
+    cmake_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)),
+    wakeup_timer(make_unique<FrameWakeupTimer>(W)) {
  
-    file_menu = make_unique<SystemMenuView>("File", vector<MenuItem>{
+    file_menu = SystemMenuView::Create("File", vector<MenuItem>{
       MenuItem{"o", "Open",  [=]{ app->ShowSystemFileChooser(1,0,0,[=](const StringVec &a){ Open(a.size()?a[0]:""); app->scheduler.Wakeup(0); }); }},
       MenuItem{"s", "Save",  [=]{ if (auto t = Top()) t->view.Save(); app->scheduler.Wakeup(0); }},
       MenuItem{"b", "Build", [=]{ Build();                            app->scheduler.Wakeup(0); }},
@@ -110,7 +112,7 @@ struct EditorGUI : public GUI {
       MenuItem{"", StrCat(FLAGS_cvs_cmd, " diff"), [=]{ DiffCVS();             app->scheduler.Wakeup(0); }}
     });
  
-    view_menu = make_unique<SystemMenuView>("View", vector<MenuItem>{
+    view_menu = SystemMenuView::Create("View", vector<MenuItem>{
       MenuItem{"=", "Zoom In", },
       MenuItem{"-", "Zoom Out", },
       MenuItem{"",  "No wrap",    [=]{ if (auto t = Top()) t->view.SetWrapMode("none");  app->scheduler.Wakeup(0); }},
@@ -120,13 +122,13 @@ struct EditorGUI : public GUI {
       MenuItem{"",  "Show Build Console",    [=]{ ShowBuildTerminal();                   app->scheduler.Wakeup(0); }},
     });
  
-    find_panel = make_unique<SystemPanelView>(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
+    find_panel = SystemPanelView::Create(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
       PanelItem{ "textbox",  Box(20, 20, 160, 20), [=](const string &a){ Find(a);               app->scheduler.Wakeup(0); }},
       PanelItem{ "button:<", Box(200, 20, 40, 20), [=](const string &a){ FindPrevOrNext(true);  app->scheduler.Wakeup(0); }},
       PanelItem{ "button:>", Box(240, 20, 40, 20), [=](const string &a){ FindPrevOrNext(false); app->scheduler.Wakeup(0); }}
     });
  
-    gotoline_panel = make_unique<SystemPanelView>(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
+    gotoline_panel = SystemPanelView::Create(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
       PanelItem{ "textbox", Box(20, 20, 160, 20), [=](const string &a){ GotoLine(a); app->scheduler.Wakeup(0); }}
     });
 
@@ -214,7 +216,7 @@ struct EditorGUI : public GUI {
     e->line.SetAttrSource(&e->style);
     e->SetColors(my_app->cpp_colors);
     e->InitContextMenu(bind([=](){ app->ShowSystemContextMenu(source_context_menu); }));
-    e->modified_cb = [=]{ app->scheduler.WakeupIn(0, Seconds(1), true); };
+    e->modified_cb = [=]{ wakeup_timer->WakeupIn(Seconds(1)); };
     e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
     e->tab_cb = bind(&EditorGUI::CompleteCode, this);
 
@@ -487,7 +489,7 @@ extern "C" void MyAppCreate(int argc, const char* const* argv) {
   FLAGS_enable_video = FLAGS_enable_input = true;
   FLAGS_threadpool_size = 1;
   app = new Application(argc, argv);
-  app->focused = new Window();
+  app->focused = Window::Create();
   my_app = new MyAppState();
   app->name = "LEdit";
   app->window_start_cb = MyWindowStart;
