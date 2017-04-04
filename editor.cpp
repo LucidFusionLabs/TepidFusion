@@ -56,7 +56,7 @@ struct MyEditorDialog : public EditorDialog {
   virtual ~MyEditorDialog() {}
 };
 
-struct EditorGUI : public GUI {
+struct EditorView : public View {
   static const int init_right_divider_w=224;
   Box top_center_pane, bottom_center_pane, left_pane, right_pane;
   Widget::Divider bottom_divider, right_divider;
@@ -70,8 +70,8 @@ struct EditorGUI : public GUI {
   CodeCompletionsViewDialog code_completions;
   MyEditorDialog *code_completions_editor=0;
   unique_ptr<Terminal> build_terminal;
-  unique_ptr<SystemMenuView> file_menu, edit_menu, view_menu;
-  unique_ptr<SystemPanelView> find_panel, gotoline_panel;
+  unique_ptr<MenuViewInterface> file_menu, edit_menu, view_menu;
+  unique_ptr<PanelViewInterface> find_panel, gotoline_panel;
   vector<MenuItem> source_context_menu{
     MenuItem{ "", "Go To Brace",      [=]{ GotoMatchingBrace(); app->scheduler.Wakeup(0); }},
     MenuItem{ "", "Go To Definition", [=]{ GotoDefinition();    app->scheduler.Wakeup(0); }} };
@@ -85,7 +85,7 @@ struct EditorGUI : public GUI {
   RegexCMakeHighlighter cmake_highlighter;
   unique_ptr<FrameWakeupTimer> wakeup_timer;
 
-  EditorGUI(Window *W) : GUI(W),
+  EditorView(Window *W) : View(W),
     bottom_divider(this, true, 0), right_divider(this, false, init_right_divider_w),
     source_tabs(this), project_tabs(this), options_tabs(this),
     dir_tree        (root, app->fonts->Change(root->default_font, 0, Color::black, Color::grey90)),
@@ -96,14 +96,14 @@ struct EditorGUI : public GUI {
     cmake_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)),
     wakeup_timer(make_unique<FrameWakeupTimer>(W)) {
  
-    file_menu = SystemMenuView::Create("File", vector<MenuItem>{
+    file_menu = SystemToolkit::CreateMenu("File", vector<MenuItem>{
       MenuItem{"o", "Open",  [=]{ app->ShowSystemFileChooser(1,0,0,[=](const StringVec &a){ Open(a.size()?a[0]:""); app->scheduler.Wakeup(0); }); }},
       MenuItem{"s", "Save",  [=]{ if (auto t = Top()) t->view.Save(); app->scheduler.Wakeup(0); }},
       MenuItem{"b", "Build", [=]{ Build();                            app->scheduler.Wakeup(0); }},
       MenuItem{"",  "Tidy",  [=]{ Tidy();                             app->scheduler.Wakeup(0); }}
     });
 
-    edit_menu = SystemMenuView::CreateEditMenu({
+    edit_menu = SystemToolkit::CreateEditMenu({
       MenuItem{"z", "Undo",  [=]{ if (auto t = Top()) t->view.WalkUndo(true);  app->scheduler.Wakeup(0); }},
       MenuItem{"y", "Redo",  [=]{ if (auto t = Top()) t->view.WalkUndo(false); app->scheduler.Wakeup(0); }},
       MenuItem{"f", "Find",  [=]{ Find("");                                    app->scheduler.Wakeup(0); }},
@@ -112,7 +112,7 @@ struct EditorGUI : public GUI {
       MenuItem{"", StrCat(FLAGS_cvs_cmd, " diff"), [=]{ DiffCVS();             app->scheduler.Wakeup(0); }}
     });
  
-    view_menu = SystemMenuView::Create("View", vector<MenuItem>{
+    view_menu = SystemToolkit::CreateMenu("View", vector<MenuItem>{
       MenuItem{"=", "Zoom In", },
       MenuItem{"-", "Zoom Out", },
       MenuItem{"",  "No wrap",    [=]{ if (auto t = Top()) t->view.SetWrapMode("none");  app->scheduler.Wakeup(0); }},
@@ -122,13 +122,13 @@ struct EditorGUI : public GUI {
       MenuItem{"",  "Show Build Console",    [=]{ ShowBuildTerminal();                   app->scheduler.Wakeup(0); }},
     });
  
-    find_panel = SystemPanelView::Create(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
+    find_panel = SystemToolkit::CreatePanel(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
       PanelItem{ "textbox",  Box(20, 20, 160, 20), [=](const string &a){ Find(a);               app->scheduler.Wakeup(0); }},
       PanelItem{ "button:<", Box(200, 20, 40, 20), [=](const string &a){ FindPrevOrNext(true);  app->scheduler.Wakeup(0); }},
       PanelItem{ "button:>", Box(240, 20, 40, 20), [=](const string &a){ FindPrevOrNext(false); app->scheduler.Wakeup(0); }}
     });
  
-    gotoline_panel = SystemPanelView::Create(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
+    gotoline_panel = SystemToolkit::CreatePanel(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
       PanelItem{ "textbox", Box(20, 20, 160, 20), [=](const string &a){ GotoLine(a); app->scheduler.Wakeup(0); }}
     });
 
@@ -141,12 +141,12 @@ struct EditorGUI : public GUI {
       if (auto n = v->GetNode(id)) if (n->val.size() && n->val.back() != '/') Open(n->val);
     };
     project_tabs.AddTab(&dir_tree);
-    root->gui.push_back(&dir_tree);
+    root->view.push_back(&dir_tree);
 
     targets_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (my_app->project) targets_tree.title_text = "Targets";
     project_tabs.AddTab(&targets_tree);
-    root->gui.push_back(&targets_tree);
+    root->view.push_back(&targets_tree);
     project_tabs.SelectTab(&dir_tree);
 
     options_tree.view.SetRoot(options_tree.view.AddNode(nullptr, "", PropertyTree::Children{
@@ -159,10 +159,10 @@ struct EditorGUI : public GUI {
     options_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (my_app->project) options_tree.title_text = "Options";
     options_tabs.AddTab(&options_tree);
-    root->gui.push_back(&options_tree);
+    root->view.push_back(&options_tree);
 
     code_completions.deleted_cb = [=](){ code_completions_editor = nullptr; };
-    root->gui.push_back(&code_completions);
+    root->view.push_back(&code_completions);
 
     build_terminal = make_unique<Terminal>(nullptr, root, root->default_font);
     build_terminal->newline_mode = true;
@@ -176,7 +176,7 @@ struct EditorGUI : public GUI {
         targets_tree.view.Reload();
         targets_tree.view.Redraw();
         if (!FLAGS_default_project.empty() && !cmakedaemon.GetTargetInfo
-            (FLAGS_default_project, bind(&EditorGUI::UpdateDefaultProjectProperties, this, _1)))
+            (FLAGS_default_project, bind(&EditorView::UpdateDefaultProjectProperties, this, _1)))
           ERROR("default_project ", FLAGS_default_project, " not found");
       }); };
       cmakedaemon.Start(Asset::FileName(FLAGS_cmake_daemon), my_app->project->build_dir);
@@ -217,8 +217,8 @@ struct EditorGUI : public GUI {
     e->SetColors(my_app->cpp_colors);
     e->InitContextMenu(bind([=](){ app->ShowSystemContextMenu(source_context_menu); }));
     e->modified_cb = [=]{ wakeup_timer->WakeupIn(Seconds(1)); };
-    e->newline_cb = bind(&EditorGUI::IndentNewline, this, editor);
-    e->tab_cb = bind(&EditorGUI::CompleteCode, this);
+    e->newline_cb = bind(&EditorView::IndentNewline, this, editor);
+    e->tab_cb = bind(&EditorView::CompleteCode, this);
 
     if (editor->file_type) {
       e->annotation_cb = [=](const Editor::LineMap::Iterator &i, const String16 &t,
@@ -253,7 +253,7 @@ struct EditorGUI : public GUI {
   }
 
   void Layout() {
-    ResetGL();
+    // ResetGL();
     box = root->Box();
     right_divider.LayoutDivideRight(box, &top_center_pane, &right_pane, -box.h);
     bottom_divider.LayoutDivideBottom(top_center_pane, &top_center_pane, &bottom_center_pane, -box.h);
@@ -282,7 +282,7 @@ struct EditorGUI : public GUI {
     if (bottom_divider.changed || right_divider.changed) Layout();
     if (child_box.data.empty()) Layout();
     source_tabs.Draw();
-    GUI::Draw();
+    View::Draw();
     gc.gd->DrawMode(DrawMode::_2D);
     if (bottom_center_pane.h) build_terminal->Draw(bottom_center_pane, TextArea::DrawFlag::CheckResized);
     gc.gd->DrawMode(DrawMode::_2D);
@@ -469,13 +469,13 @@ void MyWindowInit(Window *W) {
   W->width = FLAGS_width;
   W->height = FLAGS_height;
   W->caption = app->name;
-  CHECK_EQ(0, W->NewGUI());
+  CHECK_EQ(0, W->NewView());
 }
 
 void MyWindowStart(Window *W) {
-  EditorGUI *editor_gui = W->ReplaceGUI(0, make_unique<EditorGUI>(W));
-  if (FLAGS_console) W->InitConsole(bind(&EditorGUI::OnConsoleAnimating, editor_gui));
-  W->frame_cb = bind(&EditorGUI::Frame, editor_gui, _1, _2, _3);
+  EditorView *editor_gui = W->ReplaceView(0, make_unique<EditorView>(W));
+  if (FLAGS_console) W->InitConsole(bind(&EditorView::OnConsoleAnimating, editor_gui));
+  W->frame_cb = bind(&EditorView::Frame, editor_gui, _1, _2, _3);
   W->default_textbox = [=](){ auto t = editor_gui->Top(); return t ? &t->view : nullptr; };
   W->shell = make_unique<Shell>(W);
   BindMap *binds = W->AddInputController(make_unique<BindMap>());
@@ -526,8 +526,8 @@ extern "C" int MyAppMain() {
 
   app->StartNewWindow(app->focused);
   app->focused->gd->ClearColor(Color::grey70);
-  EditorGUI *editor_gui = app->focused->GetOwnGUI<EditorGUI>(0);
+  EditorView *editor_view = app->focused->GetOwnView<EditorView>(0);
 
-  editor_gui->Open(app->argv[optind]);
+  editor_view->Open(app->argv[optind]);
   return app->Main();
 }
