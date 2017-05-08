@@ -18,8 +18,8 @@
 
 #include "core/app/gui.h"
 #include "core/app/ipc.h"
-#include "core/app/bindings/ide.h"
-#include "core/app/bindings/syntax.h"
+#include "core/ide/ide.h"
+#include "core/ide/syntax.h"
 #include "core/imports/diff-match-patch-cpp-stl/diff_match_patch.h"
 
 namespace LFL {
@@ -96,14 +96,14 @@ struct EditorView : public View {
     cmake_highlighter(my_app->cpp_colors, my_app->cpp_colors->SetDefaultAttr(0)),
     wakeup_timer(make_unique<FrameWakeupTimer>(W)) {
  
-    file_menu = SystemToolkit::CreateMenu("File", vector<MenuItem>{
+    file_menu = app->toolkit->CreateMenu("File", vector<MenuItem>{
       MenuItem{"o", "Open",  [=]{ app->ShowSystemFileChooser(1,0,0,[=](const StringVec &a){ Open(a.size()?a[0]:""); app->scheduler.Wakeup(0); }); }},
       MenuItem{"s", "Save",  [=]{ if (auto t = Top()) t->view.Save(); app->scheduler.Wakeup(0); }},
       MenuItem{"b", "Build", [=]{ Build();                            app->scheduler.Wakeup(0); }},
       MenuItem{"",  "Tidy",  [=]{ Tidy();                             app->scheduler.Wakeup(0); }}
     });
 
-    edit_menu = SystemToolkit::CreateEditMenu({
+    edit_menu = app->toolkit->CreateEditMenu({
       MenuItem{"z", "Undo",  [=]{ if (auto t = Top()) t->view.WalkUndo(true);  app->scheduler.Wakeup(0); }},
       MenuItem{"y", "Redo",  [=]{ if (auto t = Top()) t->view.WalkUndo(false); app->scheduler.Wakeup(0); }},
       MenuItem{"f", "Find",  [=]{ Find("");                                    app->scheduler.Wakeup(0); }},
@@ -112,7 +112,7 @@ struct EditorView : public View {
       MenuItem{"", StrCat(FLAGS_cvs_cmd, " diff"), [=]{ DiffCVS();             app->scheduler.Wakeup(0); }}
     });
  
-    view_menu = SystemToolkit::CreateMenu("View", vector<MenuItem>{
+    view_menu = app->toolkit->CreateMenu("View", vector<MenuItem>{
       MenuItem{"=", "Zoom In", },
       MenuItem{"-", "Zoom Out", },
       MenuItem{"",  "No wrap",    [=]{ if (auto t = Top()) t->view.SetWrapMode("none");  app->scheduler.Wakeup(0); }},
@@ -122,13 +122,13 @@ struct EditorView : public View {
       MenuItem{"",  "Show Build Console",    [=]{ ShowBuildTerminal();                   app->scheduler.Wakeup(0); }},
     });
  
-    find_panel = SystemToolkit::CreatePanel(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
+    find_panel = app->toolkit->CreatePanel(Box(0, 0, 300, 60), "Find", vector<PanelItem>{
       PanelItem{ "textbox",  Box(20, 20, 160, 20), [=](const string &a){ Find(a);               app->scheduler.Wakeup(0); }},
       PanelItem{ "button:<", Box(200, 20, 40, 20), [=](const string &a){ FindPrevOrNext(true);  app->scheduler.Wakeup(0); }},
       PanelItem{ "button:>", Box(240, 20, 40, 20), [=](const string &a){ FindPrevOrNext(false); app->scheduler.Wakeup(0); }}
     });
  
-    gotoline_panel = SystemToolkit::CreatePanel(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
+    gotoline_panel = app->toolkit->CreatePanel(Box(0, 0, 200, 60), "Goto line number", vector<PanelItem>{
       PanelItem{ "textbox", Box(20, 20, 160, 20), [=](const string &a){ GotoLine(a); app->scheduler.Wakeup(0); }}
     });
 
