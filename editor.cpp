@@ -20,7 +20,7 @@
 #include "core/app/ipc.h"
 #include "core/ide/ide.h"
 #include "core/ide/syntax.h"
-#include "core/imports/diff-match-patch-cpp-stl/diff_match_patch.h"
+#include "imports/diff-match-patch-cpp-stl/diff_match_patch.h"
 
 namespace LFL {
 DEFINE_string(project,         "",              "CMake build dir");

@@ -6,6 +6,8 @@ endif()
 
 lfl_set_os_toolkit(EDITOR)
 lfl_project(LEditor)
+add_subdirectory(imports)
+
 lfl_add_package(LEditor SOURCES editor.cpp
                 LINK_LIBRARIES ${LFL_APP_LIB} ${EDITOR_FRAMEWORK} ${EDITOR_GRAPHICS}
                 app_null_audio app_null_camera app_null_matrix app_null_fft
@@ -15,6 +17,6 @@ lfl_add_package(LEditor SOURCES editor.cpp
                 app_null_crashreporting ${EDITOR_TOOLKIT} ${LFL_APP_OS}
                 ASSET_FILES ${LFL_APP_ASSET_FILES} ${LFL_SOURCE_DIR}/core/app/assets/Nobile.*
                 ${LFL_SOURCE_DIR}/core/app/assets/VeraMoBd.ttf,32,*
-                ASSET_DIRS ${LFL_APP_ASSET_DIRS} ${LFL_BINARY_DIR}/core/imports/cmake-daemon/bin
-                ${LFL_BINARY_DIR}/core/imports/cmake-daemon/share)
+                ASSET_DIRS ${LFL_APP_ASSET_DIRS} ${CMAKE_CURRENT_BINARY_DIR}/imports/cmake-daemon/bin
+                ${CMAKE_CURRENT_BINARY_DIR}/imports/cmake-daemon/share)
 lfl_post_build_start(LEditor)

@@ -1,0 +1,12 @@
+[submodule "imports/cmake-daemon"]
+	path = imports/cmake-daemon
+	url = https://github.com/LucidFusionLabs/CMake
+[submodule "imports/dtl"]
+	path = imports/dtl
+	url = https://github.com/cubicdaiya/dtl
+[submodule "imports/libuv"]
+	path = imports/libuv
+	url = https://github.com/libuv/libuv
+[submodule "imports/diff-match-patch-cpp-stl"]
+	path = imports/diff-match-patch-cpp-stl
+	url = https://github.com/leutloff/diff-match-patch-cpp-stl
