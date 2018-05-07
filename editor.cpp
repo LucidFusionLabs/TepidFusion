@@ -16,7 +16,9 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "core/app/gui.h"
+#include "core/app/gl/view.h"
+#include "core/app/gl/editor.h"
+#include "core/app/gl/terminal.h"
 #include "core/app/ipc.h"
 #include "core/ide/ide.h"
 #include "core/ide/syntax.h"
@@ -466,8 +468,8 @@ struct EditorView : public View {
 };
 
 void MyWindowInit(Window *W) {
-  W->width = FLAGS_width;
-  W->height = FLAGS_height;
+  W->gl_w = FLAGS_width;
+  W->gl_h = FLAGS_height;
   W->caption = app->name;
   CHECK_EQ(0, W->NewView());
 }
@@ -501,8 +503,8 @@ extern "C" void MyAppCreate(int argc, const char* const* argv) {
 extern "C" int MyAppMain() {
   if (app->Create(__FILE__)) return -1;
   SettingsFile::Load();
-  app->focused->width = FLAGS_width;
-  app->focused->height = FLAGS_height;
+  app->focused->gl_w = FLAGS_width;
+  app->focused->gl_h = FLAGS_height;
 
   if (app->Init()) return -1;
   int optind = Singleton<FlagMap>::Get()->optind;
