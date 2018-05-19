@@ -5,10 +5,10 @@ if(LFL_MOBILE)
 endif()
 
 lfl_set_os_toolkit(EDITOR)
-lfl_project(LEditor)
+lfl_project(TepidFusion)
 add_subdirectory(imports)
 
-lfl_add_package(LEditor SOURCES editor.cpp
+lfl_add_package(TepidFusion SOURCES editor.cpp
                 LINK_LIBRARIES ${LFL_APP_LIB} ${EDITOR_FRAMEWORK} ${EDITOR_GRAPHICS}
                 app_null_audio app_null_camera app_null_matrix app_null_fft
                 app_simple_resampler app_simple_loader ${LFL_APP_CONVERT}
@@ -19,4 +19,4 @@ lfl_add_package(LEditor SOURCES editor.cpp
                 ${LFL_SOURCE_DIR}/core/app/assets/VeraMoBd.ttf,32,*
                 ASSET_DIRS ${LFL_APP_ASSET_DIRS} ${CMAKE_CURRENT_BINARY_DIR}/imports/cmake-daemon/bin
                 ${CMAKE_CURRENT_BINARY_DIR}/imports/cmake-daemon/share)
-lfl_post_build_start(LEditor)
+lfl_post_build_start(TepidFusion)
