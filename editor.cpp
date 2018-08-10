@@ -44,7 +44,7 @@ struct MyApp : public Application {
   SearchPaths search_paths;
   string build_bin;
   Editor::SyntaxColors *cpp_colors = Singleton<Editor::Base16DefaultDarkSyntaxColors>::Set();
-  MyApp(int ac, const char* const* av) : Application(ac, av), search_paths(getenv("PATH")), build_bin(search_paths.Find("make")) {}
+  MyApp(int ac, const char* const* av) : Application(ac, av), search_paths(&localfs, getenv("PATH")), build_bin(search_paths.Find("make")) {}
   void OnWindowInit(Window *W);
   void OnWindowStart(Window *W);
 } *app;
@@ -141,7 +141,7 @@ struct EditorView : public View {
     Activate(); 
     dir_tree.deleted_cb = [&](){ right_divider.size=0; right_divider.changed=1; };
     if (app->project) dir_tree.title_text = "Source";
-    if (app->project) dir_tree.view.Open(StrCat(app->project->source_dir, LocalFile::Slash));
+    if (app->project) dir_tree.view.Open(StrCat(app->project->source_dir, LocalFileSystem::Slash));
     dir_tree.view.InitContextMenu(bind([=](){ app->ShowSystemContextMenu(dir_context_menu); }));
     dir_tree.view.selected_line_clicked_cb = [&](PropertyView *v, PropertyTree::Id id) {
       if (auto n = v->GetNode(id)) if (n->val.size() && n->val.back() != '/') Open(n->val);
@@ -275,7 +275,7 @@ struct EditorView : public View {
   }
 
   int Frame(LFL::Window *W, unsigned clicks, int flag) {
-    if (Singleton<FlagMap>::Get()->dirty) SettingsFile::Save(app, app->save_settings);
+    if (Singleton<FlagMap>::Get()->dirty) SettingsFile::Save(&app->localfs, app, app->save_settings);
     Time now = Now();
     MyEditorDialog *d = Top();
     GraphicsContext gc(W->gd);
@@ -435,7 +435,7 @@ struct EditorView : public View {
     if (bottom_divider.size < root->default_font->Height()) ShowBuildTerminal();
     if (build_process.in) return;
     vector<const char*> argv{ app->build_bin.c_str(), nullptr };
-    string build_dir = StrCat(app->project->build_dir, LocalFile::Slash, "term");
+    string build_dir = StrCat(app->project->build_dir, LocalFileSystem::Slash, "term");
     CHECK(!build_process.Open(&argv[0], build_dir.c_str()));
     app->RunInNetworkThread([=](){ app->net->unix_client->AddConnectedSocket
       (fileno(build_process.in), make_unique<Connection::CallbackHandler>
@@ -483,8 +483,7 @@ void MyApp::OnWindowStart(Window *W) {
   if (FLAGS_console) W->InitConsole(bind(&EditorView::OnConsoleAnimating, editor_gui));
   W->frame_cb = bind(&EditorView::Frame, editor_gui, _1, _2, _3);
   W->default_textbox = [=](){ auto t = editor_gui->Top(); return t ? &t->view : nullptr; };
-  W->shell = make_unique<Shell>(W, app, app, app, app, app, app->net.get(), app, app, app->audio.get(),
-                                app, app, app->fonts.get());
+  W->shell = make_unique<Shell>(W);
   BindMap *binds = W->AddInputController(make_unique<BindMap>());
   binds->Add('6', Key::Modifier::Cmd, Bind::CB(bind(&Shell::console, W->shell.get(), vector<string>())));
 }
@@ -496,7 +495,7 @@ extern "C" LFApp *MyAppCreate(int argc, const char* const* argv) {
   FLAGS_enable_video = FLAGS_enable_input = true;
   FLAGS_threadpool_size = 1;
   app = make_unique<MyApp>(argc, argv).release();
-  app->focused = CreateWindow(app).release();
+  app->focused = app->framework->ConstructWindow(app).release();
   app->name = "TepidFusion";
   app->window_start_cb = bind(&MyApp::OnWindowStart, app, _1);
   app->window_init_cb = bind(&MyApp::OnWindowInit, app, _1);
@@ -504,9 +503,9 @@ extern "C" LFApp *MyAppCreate(int argc, const char* const* argv) {
   return app;
 }
 
-extern "C" int MyAppMain() {
+extern "C" int MyAppMain(LFApp *application) {
   if (app->Create(__FILE__)) return -1;
-  SettingsFile::Load(app);
+  SettingsFile::Load(&app->localfs, app);
   app->focused->gl_w = FLAGS_width;
   app->focused->gl_h = FLAGS_height;
 
